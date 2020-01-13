@@ -1,26 +1,28 @@
 package models
 
 import (
-	"encoding/json"
-
-	"github.com/eleme/lindb/pkg/logger"
-	"github.com/eleme/lindb/pkg/option"
+	"github.com/lindb/lindb/pkg/encoding"
+	"github.com/lindb/lindb/pkg/option"
 )
 
-// CreateShardTask represents create shard task param
+// CreateShardTask represents the create shard task's param
 type CreateShardTask struct {
-	Database    string             `json:"database"`
-	ShardIDs    []int              `json:"shardIDs"`
-	ShardOption option.ShardOption `json:"shardOption"`
+	DatabaseName   string                `json:"databaseName"`   // database's name
+	ShardIDs       []int32               `json:"shardIDs"`       // shard ids
+	DatabaseOption option.DatabaseOption `json:"databaseOption"` // time series database
 }
 
-// Bytes returns create shard task binary data using json
+// Bytes returns the create shard task's  binary data using json
 func (t CreateShardTask) Bytes() []byte {
-	data, err := json.Marshal(t)
-	if err != nil {
-		logger.GetLogger("model/task").Error("marshal create shard task error",
-			logger.Error(err))
-		return nil
-	}
-	return data
+	return encoding.JSONMarshal(t)
+}
+
+// DatabaseFlushTask represents the database flush task's param
+type DatabaseFlushTask struct {
+	DatabaseName string `json:"databaseName"` // database's name
+}
+
+// Bytes returns the database flush task's binary data using json
+func (t DatabaseFlushTask) Bytes() []byte {
+	return encoding.JSONMarshal(t)
 }

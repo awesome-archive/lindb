@@ -1,12 +1,14 @@
-module github.com/eleme/lindb
+module github.com/lindb/lindb
 
 go 1.12
 
 require (
 	github.com/BurntSushi/toml v0.3.1
 	github.com/GeertJohan/go.rice v1.0.0
-	github.com/RoaringBitmap/roaring v0.0.0-20190528123335-bb10301c98ba
+	github.com/StackExchange/wmi v0.0.0-20190523213315-cbe66965904d // indirect
 	github.com/antlr/antlr4 v0.0.0-20190623224521-a770ff26ccc4
+	github.com/benbjohnson/tmpl v1.0.0 // indirect
+	github.com/cespare/xxhash v1.1.0
 	github.com/coreos/bbolt v1.3.3 // indirect
 	github.com/coreos/etcd v3.3.13+incompatible
 	github.com/coreos/go-semver v0.3.0 // indirect
@@ -14,6 +16,7 @@ require (
 	github.com/coreos/pkg v0.0.0-20180928190104-399ea9e2e55f
 	github.com/damnever/goctl v1.1.0
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible
+	github.com/go-ole/go-ole v1.2.4 // indirect
 	github.com/gogo/protobuf v1.2.1 // indirect
 	github.com/golang/groupcache v0.0.0-20190129154638-5b532d6fd5ef // indirect
 	github.com/golang/mock v1.1.1
@@ -25,25 +28,36 @@ require (
 	github.com/grpc-ecosystem/go-grpc-middleware v1.0.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway v1.9.2 // indirect
+	github.com/hillbig/rsdic v0.0.0-20150805052524-6158e7a2d824
 	github.com/jonboulle/clockwork v0.1.0 // indirect
-	github.com/magiconair/properties v1.8.0
+	github.com/json-iterator/go v1.1.6
+	github.com/lindb/roaring v0.0.0-00010101000000-000000000000
 	github.com/mattn/go-isatty v0.0.8
 	github.com/pkg/errors v0.8.1
+	github.com/plar/go-adaptive-radix-tree v1.0.1
 	github.com/prometheus/client_golang v1.0.0 // indirect
+	github.com/segmentio/fasthash v1.0.0
+	github.com/shirou/gopsutil v2.19.9+incompatible
+	github.com/smartystreets/goconvey v1.6.4 // indirect
 	github.com/soheilhy/cmux v0.1.4 // indirect
 	github.com/spf13/cobra v0.0.5
-	github.com/stretchr/testify v1.3.0
+	github.com/stretchr/testify v1.4.0
 	github.com/tmc/grpc-websocket-proxy v0.0.0-20190109142713-0ad062ec5ee5 // indirect
+	github.com/uber-go/tally v3.3.13+incompatible
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
 	go.etcd.io/bbolt v1.3.3 // indirect
-	go.uber.org/atomic v1.4.0
-	go.uber.org/multierr v0.0.0-20190429210458-bd075f90b08f // indirect
-	go.uber.org/zap v0.0.0-20190430155229-8a2ee5670ced
+	go.uber.org/atomic v1.5.0
+	go.uber.org/zap v1.12.0
 	golang.org/x/crypto v0.0.0-20190701094942-4def268fd1a4 // indirect
 	golang.org/x/net v0.0.0-20190628185345-da137c7871d7 // indirect
-	golang.org/x/sys v0.0.0-20190730174312-6a60838ec25 // indirect
+	golang.org/x/sys v0.0.0-20190730174312-6a60838ec25
 	golang.org/x/text v0.3.2 // indirect
 	golang.org/x/time v0.0.0-20190513212739-9d24e82272b4 // indirect
 	google.golang.org/grpc v1.21.1
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127
+	gopkg.in/natefinch/lumberjack.v2 v2.0.0
 )
+
+// just redirect to local repo for local debug
+// replace github.com/lindb/roaring => /Users/jie.huang/go/src/github.com/lindb/roaring
+replace github.com/lindb/roaring => github.com/lindb/roaring v0.0.0-20191203023710-160cbe24e4c7

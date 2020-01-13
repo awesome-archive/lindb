@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sync"
 
-	"github.com/eleme/lindb/constants"
-	"github.com/eleme/lindb/coordinator/discovery"
-	"github.com/eleme/lindb/coordinator/storage"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/logger"
-	"github.com/eleme/lindb/pkg/state"
+	"github.com/lindb/lindb/constants"
+	"github.com/lindb/lindb/coordinator/discovery"
+	"github.com/lindb/lindb/coordinator/storage"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/state"
 )
+
+//go:generate mockgen -source=./admin_state_machine.go -destination=./admin_state_machine_mock.go -package=database
 
 // AdminStateMachine is database config controller,
 // creates shard assignment based on config and active nodes related storage cluster.
@@ -21,13 +24,12 @@ type AdminStateMachine interface {
 	discovery.Listener
 
 	// Close closes admin state machine, stops watch change event
-	Close() error
+	io.Closer
 }
 
 // adminStateMachine implement admin state machine interface.
 // all metadata change will store related storage cluster.
 type adminStateMachine struct {
-	repo           state.Repository
 	storageCluster storage.ClusterStateMachine
 	discovery      discovery.Discovery
 
@@ -39,19 +41,18 @@ type adminStateMachine struct {
 }
 
 // NewAdminStateMachine creates admin state machine instance
-func NewAdminStateMachine(ctx context.Context, repo state.Repository,
+func NewAdminStateMachine(ctx context.Context, discoveryFactory discovery.Factory,
 	storageCluster storage.ClusterStateMachine) (AdminStateMachine, error) {
 	c, cancel := context.WithCancel(ctx)
 	// new admin state machine instance
 	stateMachine := &adminStateMachine{
-		repo:           repo,
 		storageCluster: storageCluster,
 		ctx:            c,
 		cancel:         cancel,
-		log:            logger.GetLogger("database/admin/state/machine"),
+		log:            logger.GetLogger("coordinator", "AdminStateMachine"),
 	}
 	// new database config discovery
-	stateMachine.discovery = discovery.NewDiscovery(repo, constants.DatabaseConfigPath, stateMachine)
+	stateMachine.discovery = discoveryFactory.CreateDiscovery(constants.DatabaseConfigPath, stateMachine)
 	if err := stateMachine.discovery.Discovery(); err != nil {
 		return nil, fmt.Errorf("discovery database config error:%s", err)
 	}
@@ -75,39 +76,31 @@ func (sm *adminStateMachine) OnCreate(key string, resource []byte) {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
-	for _, clusterCfg := range cfg.Clusters {
-		cluster := sm.storageCluster.GetCluster(clusterCfg.Name)
-		if cluster == nil {
-			sm.log.Error("storage cluster not exist",
-				logger.String("cluster", clusterCfg.Name))
-			continue
-		}
-		shardAssign, err := cluster.GetShardAssign(cfg.Name)
-		if err != nil && err != state.ErrNotExist {
-			sm.log.Error("get shard assign error", logger.Error(err), logger.Stack())
-			return
-		}
-		// build shard assignment for creation database, generate related coordinator task
-		if shardAssign == nil {
-			if err := sm.createShardAssignment(cfg.Name, cluster, clusterCfg); err != nil {
-				sm.log.Error("create shard assignment error",
-					logger.String("data", string(resource)), logger.Error(err))
-			}
-		}
-
+	cluster := sm.storageCluster.GetCluster(cfg.Cluster)
+	if cluster == nil {
+		sm.log.Error("storage cluster not exist",
+			logger.String("cluster", cfg.Cluster))
+		return
 	}
+	shardAssign, err := cluster.GetShardAssign(cfg.Name)
+	if err != nil && err != state.ErrNotExist {
+		sm.log.Error("get shard assign error", logger.Error(err))
+		return
+	}
+	// build shard assignment for creation database, generate related coordinator task
+	if shardAssign == nil {
+		if err := sm.createShardAssignment(cfg.Name, cluster, &cfg); err != nil {
+			sm.log.Error("create shard assignment error",
+				logger.String("data", string(resource)), logger.Error(err))
+		}
+	}
+
 	//} else if len(shardAssign.Shards) != cfg.NumOfShard {
 	//TODO need implement modify database shard num.
 }
 
 func (sm *adminStateMachine) OnDelete(key string) {
 	//TODO impl delete database???
-	//panic("implement me")
-}
-
-// Cleanup does cleanup operation when receive event
-func (sm *adminStateMachine) Cleanup() {
-	//TODO
 	//panic("implement me")
 }
 
@@ -123,15 +116,15 @@ func (sm *adminStateMachine) Close() error {
 // 2) save shard assignment into related storage cluster
 // 3) submit create shard coordinator task(storage node will execute it when receive task event)
 func (sm *adminStateMachine) createShardAssignment(databaseName string,
-	cluster storage.Cluster, clusterCfg models.DatabaseCluster) error {
+	cluster storage.Cluster, cfg *models.Database) error {
 	activeNodes := cluster.GetActiveNodes()
 	if len(activeNodes) == 0 {
 		return fmt.Errorf("active node not found")
 	}
 	//TODO need calc resource and pick related node for store data
-	var nodes = make(map[int]models.Node)
+	var nodes = make(map[int]*models.Node)
 	for idx, node := range activeNodes {
-		nodes[idx] = node
+		nodes[idx] = &node.Node
 	}
 
 	var nodeIDs []int
@@ -140,34 +133,16 @@ func (sm *adminStateMachine) createShardAssignment(databaseName string,
 	}
 
 	// generate shard assignment based on node ids and config
-	shardAssign, err := ShardAssignment(nodeIDs, clusterCfg)
+	shardAssign, err := ShardAssignment(nodeIDs, cfg)
 	if err != nil {
 		return err
 	}
 	// set nodes and config, storage node will use it when execute create shard task
 	shardAssign.Nodes = nodes
-	shardAssign.Config = clusterCfg
 
 	// save shard assignment into related storage cluster
-	if err := cluster.SaveShardAssign(databaseName, shardAssign); err != nil {
+	if err := cluster.SaveShardAssign(databaseName, shardAssign, cfg.Option); err != nil {
 		return err
 	}
 	return nil
-}
-
-// getNodes returns all active nodes by cluster name
-func (sm *adminStateMachine) getNodes(clusterName string) (map[int]models.Node, error) {
-	cluster := sm.storageCluster.GetCluster(clusterName)
-	if cluster == nil {
-		return nil, fmt.Errorf("stroage cluster not exist")
-	}
-	activeNodes := cluster.GetActiveNodes()
-	if len(activeNodes) == 0 {
-		return nil, fmt.Errorf("active node not found")
-	}
-	var nodes = make(map[int]models.Node)
-	for idx, node := range activeNodes {
-		nodes[idx] = node
-	}
-	return nodes, nil
 }

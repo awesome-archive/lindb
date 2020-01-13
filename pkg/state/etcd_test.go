@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eleme/lindb/mock"
-	"github.com/eleme/lindb/pkg/util"
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/mock"
+	"github.com/lindb/lindb/pkg/hostutil"
 
 	"gopkg.in/check.v1"
 )
@@ -28,9 +29,9 @@ func TestETCDRepo(t *testing.T) {
 }
 
 func (ts *testEtcdRepoSuite) Test_Write_Read(c *check.C) {
-	var rep, err = newEtedRepository(Config{
+	var rep, err = newEtedRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
-	})
+	}, "nobody")
 	if err != nil {
 		c.Fatal(err)
 	}
@@ -61,10 +62,10 @@ func (ts *testEtcdRepoSuite) Test_Write_Read(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestList(c *check.C) {
-	var rep, err = newEtedRepository(Config{
+	var rep, err = newEtedRepository(config.RepoState{
 		Namespace: "/test/list",
 		Endpoints: ts.Cluster.Endpoints,
-	})
+	}, "nobody")
 	if err != nil {
 		c.Fatal(err)
 	}
@@ -84,18 +85,18 @@ func (ts *testEtcdRepoSuite) TestList(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestNew(c *check.C) {
-	_, err := newEtedRepository(Config{})
+	_, err := newEtedRepository(config.RepoState{}, "nobody")
 	c.Assert(err, check.NotNil)
 }
 
 func (ts *testEtcdRepoSuite) TestHeartBeat(c *check.C) {
-	b, err := newEtedRepository(Config{
+	b, err := newEtedRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
-	})
+	}, "nobody")
 	if err != nil {
 		c.Fatal(err)
 	}
-	ip, _ := util.GetHostIP()
+	ip, _ := hostutil.GetHostIP()
 	heartbeat := fmt.Sprintf("/cluster1/storage/heartbeat/%s:%d", ip, 2918)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -122,13 +123,13 @@ func (ts *testEtcdRepoSuite) TestHeartBeat(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestWatch(c *check.C) {
-	b, _ := newEtedRepository(Config{
+	b, _ := newEtedRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
-	})
+	}, "nobody")
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// test watch no exist path
-	ch := b.Watch(ctx, "/cluster1/controller/1")
+	ch := b.Watch(ctx, "/cluster1/controller/1", true)
 	c.Assert(ch, check.NotNil)
 	var wg sync.WaitGroup
 	var mutex sync.RWMutex
@@ -155,7 +156,7 @@ func (ts *testEtcdRepoSuite) TestWatch(c *check.C) {
 
 	// test watch exist path
 	_ = b.Put(ctx, "/cluster1/controller/2", []byte("2"))
-	ch2 := b.Watch(ctx, "/cluster1/controller/2")
+	ch2 := b.Watch(ctx, "/cluster1/controller/2", true)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -164,7 +165,7 @@ func (ts *testEtcdRepoSuite) TestWatch(c *check.C) {
 
 	// modify value of key2
 	_ = b.Put(ctx, "/cluster1/controller/2", []byte("222"))
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	cancel()
 	wg.Wait()
 
@@ -175,15 +176,15 @@ func (ts *testEtcdRepoSuite) TestWatch(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestGetWatchPrefix(c *check.C) {
-	b, _ := newEtedRepository(Config{
+	b, _ := newEtedRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
-	})
+	}, "nobody")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	_ = b.Put(context.TODO(), "/lindb/broker/1", []byte("1"))
 	_ = b.Put(context.TODO(), "/lindb/broker/2", []byte("2"))
-	ch := b.WatchPrefix(ctx, "/lindb/broker")
+	ch := b.WatchPrefix(ctx, "/lindb/broker", true)
 	time.Sleep(100 * time.Millisecond)
 
 	_ = b.Put(context.TODO(), "/lindb/broker/3", []byte("3"))
@@ -231,13 +232,13 @@ func (ts *testEtcdRepoSuite) TestGetWatchPrefix(c *check.C) {
 	c.Assert(deleteEvt, check.Equals, true)
 }
 
-func (ts *testEtcdRepoSuite) TestPutIfNotExitAndKeepLease(c *check.C) {
-	b, _ := newEtedRepository(Config{
+func (ts *testEtcdRepoSuite) TestElect(c *check.C) {
+	b, _ := newEtedRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
-	})
+	}, "nobody")
 	ctx, cancel := context.WithCancel(context.Background())
 	// the key should not exist,it must be success
-	success, ch, err := b.PutIfNotExist(ctx, "/lindb/breoker/master", []byte("test"), 1)
+	success, ch, err := b.Elect(ctx, "/lindb/breoker/master", []byte("test"), 1)
 	if err != nil {
 		c.Fatal(err)
 	}
@@ -250,7 +251,7 @@ func (ts *testEtcdRepoSuite) TestPutIfNotExitAndKeepLease(c *check.C) {
 	c.Assert(string(bytes), check.Equals, "test")
 
 	ctx2, cancel2 := context.WithCancel(context.Background())
-	shouldFalse, _, _ := b.PutIfNotExist(ctx2, "/lindb/breoker/master", []byte("test2"), 1)
+	shouldFalse, _, _ := b.Elect(ctx2, "/lindb/breoker/master", []byte("test2"), 1)
 	if cancel2 != nil {
 		cancel2()
 	}
@@ -270,7 +271,7 @@ func (ts *testEtcdRepoSuite) TestPutIfNotExitAndKeepLease(c *check.C) {
 	}
 
 	ctx3, cancel3 := context.WithCancel(context.Background())
-	shouldSuccess, _, _ := b.PutIfNotExist(ctx3, "/lindb/breoker/master", []byte("test3"), 1)
+	shouldSuccess, _, _ := b.Elect(ctx3, "/lindb/breoker/master", []byte("test3"), 1)
 	c.Assert(shouldSuccess, check.Equals, true)
 
 	bytes3, _ := b.Get(context.TODO(), "/lindb/breoker/master")
@@ -281,10 +282,10 @@ func (ts *testEtcdRepoSuite) TestPutIfNotExitAndKeepLease(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestBatch(c *check.C) {
-	b, _ := newEtedRepository(Config{
+	b, _ := newEtedRepository(config.RepoState{
 		Namespace: "/test/batch",
 		Endpoints: ts.Cluster.Endpoints,
-	})
+	}, "nobody")
 	batch := Batch{
 		KVs: []KeyValue{
 			{"key1", []byte("value1")},
@@ -296,4 +297,52 @@ func (ts *testEtcdRepoSuite) TestBatch(c *check.C) {
 
 	list, _ := b.List(context.TODO(), "key")
 	c.Assert(3, check.Equals, len(list))
+}
+
+func (ts *testEtcdRepoSuite) TestTransaction(c *check.C) {
+	b, _ := newEtedRepository(config.RepoState{
+		Namespace: "/test/batch",
+		Endpoints: ts.Cluster.Endpoints,
+	}, "nobody")
+
+	txn := b.NewTransaction()
+	txn.Put("test", []byte("value"))
+	err := b.Commit(context.TODO(), txn)
+	if err != nil {
+		c.Fatal(err)
+	}
+
+	v, _ := b.Get(context.TODO(), "test")
+	c.Assert([]byte("value"), check.DeepEquals, v)
+
+	txn = b.NewTransaction()
+	txn.ModRevisionCmp("key", "=", 0)
+	txn.Put("test", []byte("value2"))
+	err = b.Commit(context.TODO(), txn)
+	if err != nil {
+		c.Fatal(err)
+	}
+	v, _ = b.Get(context.TODO(), "test")
+	c.Assert([]byte("value2"), check.DeepEquals, v)
+
+	txn = b.NewTransaction()
+	txn.ModRevisionCmp("key", "=", 33)
+	txn.Delete("test")
+	err = b.Commit(context.TODO(), txn)
+	c.Assert(err, check.NotNil)
+
+	v, _ = b.Get(context.TODO(), "test")
+	c.Assert([]byte("value2"), check.DeepEquals, v)
+
+	txn = b.NewTransaction()
+	txn.ModRevisionCmp("key", "=", 0)
+	txn.Delete("test")
+	err = b.Commit(context.TODO(), txn)
+	if err != nil {
+		c.Fatal(err)
+	}
+	_, err = b.Get(context.TODO(), "test")
+	c.Assert(err, check.NotNil)
+
+	c.Assert(TxnErr(nil, fmt.Errorf("err")), check.NotNil)
 }

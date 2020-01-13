@@ -2,19 +2,60 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sync"
 
-	"github.com/eleme/lindb/constants"
-	"github.com/eleme/lindb/coordinator/discovery"
-	"github.com/eleme/lindb/coordinator/task"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/logger"
-	"github.com/eleme/lindb/pkg/pathutil"
-	"github.com/eleme/lindb/pkg/state"
-	"github.com/eleme/lindb/service"
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/constants"
+	"github.com/lindb/lindb/coordinator/discovery"
+	"github.com/lindb/lindb/coordinator/task"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/pkg/encoding"
+	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/option"
+	"github.com/lindb/lindb/pkg/state"
+	"github.com/lindb/lindb/service"
 )
+
+//go:generate mockgen -source=./cluster.go -destination=./cluster_mock.go -package=storage
+
+var log = logger.GetLogger("coordinator", "StorageCluster")
+
+// clusterCfg represents the config which creates cluster instance need
+// IMPORTANT: need clean config's resource
+type clusterCfg struct {
+	ctx                 context.Context
+	cfg                 config.StorageCluster
+	storageStateService service.StorageStateService
+	repo                state.Repository
+	controllerFactory   task.ControllerFactory
+	factory             discovery.Factory
+	shardAssignService  service.ShardAssignService
+}
+
+// clean cleans the resource for cfg
+func (cfg *clusterCfg) clean() {
+	if err := cfg.repo.Close(); err != nil {
+		log.Error("close state repo of storage cluster",
+			logger.String("cluster", cfg.cfg.Name), logger.Error(err), logger.Stack())
+	}
+}
+
+// ClusterFactory represents a cluster create factory
+type ClusterFactory interface {
+	// newCluster creates cluster controller
+	newCluster(cfg clusterCfg) (Cluster, error)
+}
+
+// clusterFactory implements ClusterFactory interface
+type clusterFactory struct {
+}
+
+// NewClusterFactory creates a cluster factory
+func NewClusterFactory() ClusterFactory {
+	return &clusterFactory{}
+}
 
 // Cluster represents storage cluster controller,
 // 1) discovery active node list in cluster
@@ -22,107 +63,164 @@ import (
 // 3) generate coordinator task
 type Cluster interface {
 	discovery.Listener
+
 	// GetActiveNodes returns all active nodes
-	GetActiveNodes() []models.Node
+	GetActiveNodes() []*models.ActiveNode
+
+	// CollectStat collects storage cluster's stat
+	CollectStat() (*models.StorageClusterStat, error)
+
 	// GetShardAssign returns shard assignment by database name, return not exist err if it not exist
 	GetShardAssign(databaseName string) (*models.ShardAssignment, error)
+
+	// FLushDatabase submits the coordinator task for flushing memory database by name
+	FlushDatabase(databaseName string) error
+
 	// SaveShardAssign saves shard assignment
-	SaveShardAssign(databaseName string, shardAssign *models.ShardAssignment) error
+	SaveShardAssign(
+		databaseName string,
+		shardAssign *models.ShardAssignment,
+		databaseOption option.DatabaseOption,
+	) error
+
 	// SubmitTask generates coordinator task
-	SubmitTask(kind task.Kind, name string, params []task.ControllerTaskParam) error
+	SubmitTask(
+		kind task.Kind,
+		name string,
+		params []task.ControllerTaskParam,
+	) error
+
 	// GetRepo returns current storage cluster's state repo
 	GetRepo() state.Repository
+
 	// Close closes cluster controller
 	Close()
 }
 
 // cluster implements cluster controller, master will maintain multi storage cluster
 type cluster struct {
-	cfg                models.StorageCluster
-	repo               state.Repository
-	discovery          discovery.Discovery
-	shardAssignService service.ShardAssignService
-	controller         *task.Controller
-	nodes              map[string]models.Node
-	databases          map[string]*models.DatabaseCluster
+	cfg            clusterCfg
+	discovery      discovery.Discovery
+	taskController task.Controller
+
+	clusterState *models.StorageState
 
 	mutex sync.RWMutex
-	log   *logger.Logger
 }
 
-// newCluster creates cluster controller, init active node list if exist node
-func newCluster(ctx context.Context, cfg models.StorageCluster) (Cluster, error) {
-	repo, err := state.NewRepo(cfg.Config)
-	if err != nil {
-		return nil, fmt.Errorf("new state repo error when create cluster,error:%s", err)
-	}
+// newCluster creates cluster controller, init active node list if exist node, must return cluster
+func (f *clusterFactory) newCluster(cfg clusterCfg) (Cluster, error) {
 	cluster := &cluster{
-		cfg:                cfg,
-		repo:               repo,
-		shardAssignService: service.NewShardAssignService(repo),
-		controller:         task.NewController(ctx, repo),
-		nodes:              make(map[string]models.Node),
-		databases:          make(map[string]*models.DatabaseCluster),
-		log:                logger.GetLogger("coordinator/storage/cluster"),
+		cfg:          cfg,
+		clusterState: models.NewStorageState(),
 	}
 	// init active nodes if exist
-	nodeList, err := repo.List(ctx, constants.ActiveNodesPath)
+	nodeList, err := cfg.repo.List(cfg.ctx, constants.ActiveNodesPath)
 	if err != nil {
-		return nil, fmt.Errorf("get active nodes error:%s", err)
+		return cluster, fmt.Errorf("get active nodes error:%s", err)
 	}
 	for _, node := range nodeList {
-		cluster.addNode(node)
+		_ = cluster.addNode(node.Value)
 	}
+	// set cluster name
+	cluster.clusterState.Name = cfg.cfg.Name
+	// saving new cluster state
+	cluster.saveClusterState()
 
 	// new storage active node discovery
-	cluster.discovery = discovery.NewDiscovery(repo, constants.ActiveNodesPath, cluster)
+	cluster.discovery = cfg.factory.CreateDiscovery(constants.ActiveNodesPath, cluster)
 	if err := cluster.discovery.Discovery(); err != nil {
-		return nil, fmt.Errorf("discovery active storage nodes error:%s", err)
+		return cluster, fmt.Errorf("discovery active storage nodes error:%s", err)
 	}
+	cluster.taskController = cfg.controllerFactory.CreateController(cfg.ctx, cfg.repo)
+
+	log.Info("init storage cluster success", logger.String("cluster", cluster.clusterState.Name))
 	return cluster, nil
 }
 
 // OnCreate adds node into active node list when node online
 func (c *cluster) OnCreate(key string, resource []byte) {
-	c.addNode(resource)
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if c.addNode(resource) {
+		c.saveClusterState()
+	}
 }
 
 // OnDelete remove node from active node list when node offline
 func (c *cluster) OnDelete(key string) {
-	name := pathutil.GetName(key)
+	_, name := filepath.Split(key)
 	c.mutex.Lock()
-	delete(c.nodes, name)
+	c.clusterState.RemoveActiveNode(name)
 	c.mutex.Unlock()
-}
 
-func (c *cluster) Cleanup() {
-	// do nothing
+	c.saveClusterState()
 }
 
 // GetRepo returns current storage cluster's state repo
 func (c *cluster) GetRepo() state.Repository {
-	return c.repo
+	return c.cfg.repo
 }
 
 // GetActiveNodes returns all active nodes
-func (c *cluster) GetActiveNodes() []models.Node {
-	var activeNodes []models.Node
+func (c *cluster) GetActiveNodes() []*models.ActiveNode {
 	c.mutex.RLock()
-	for _, v := range c.nodes {
-		activeNodes = append(activeNodes, v)
-	}
+	activeNodes := c.clusterState.GetActiveNodes()
 	c.mutex.RUnlock()
 	return activeNodes
 }
 
+// CollectStat collects storage cluster's stat
+func (c *cluster) CollectStat() (*models.StorageClusterStat, error) {
+	kvs, err := c.GetRepo().List(c.cfg.ctx, constants.StateNodesPath)
+	if err != nil {
+		return nil, err
+	}
+	// build result
+	var result []*models.NodeStat
+	for _, kv := range kvs {
+		_, nodeID := filepath.Split(kv.Key)
+		stat := &models.NodeStat{}
+		if err := encoding.JSONUnmarshal(kv.Value, stat); err != nil {
+			return nil, err
+		}
+		_, ok := c.clusterState.ActiveNodes[nodeID]
+		if ok {
+			result = append(result, stat)
+		}
+	}
+	return &models.StorageClusterStat{Nodes: result}, err
+}
+
+// FLushDatabase submits the coordinator task for flushing memory database by name
+func (c *cluster) FlushDatabase(databaseName string) error {
+	var params []task.ControllerTaskParam
+	taskParam := &models.DatabaseFlushTask{DatabaseName: databaseName}
+	for _, node := range c.clusterState.ActiveNodes {
+		params = append(params, task.ControllerTaskParam{
+			NodeID: node.Node.Indicator(),
+			Params: taskParam,
+		})
+	}
+	// create create shard coordinator tasks
+	if err := c.SubmitTask(constants.FlushDatabase, databaseName, params); err != nil {
+		return err
+	}
+	return nil
+}
+
 // GetShardAssign returns shard assignment by database name, return not exist err if it not exist
 func (c *cluster) GetShardAssign(databaseName string) (*models.ShardAssignment, error) {
-	return c.shardAssignService.Get(databaseName)
+	return c.cfg.shardAssignService.Get(databaseName)
 }
 
 // SaveShardAssign saves shard assignment, generates create shard task after saving successfully
-func (c *cluster) SaveShardAssign(databaseName string, shardAssign *models.ShardAssignment) error {
-	if err := c.shardAssignService.Save(databaseName, shardAssign); err != nil {
+func (c *cluster) SaveShardAssign(
+	databaseName string,
+	shardAssign *models.ShardAssignment,
+	databaseOption option.DatabaseOption,
+) error {
+	if err := c.cfg.shardAssignService.Save(databaseName, shardAssign); err != nil {
 		return err
 	}
 	var tasks = make(map[int]*models.CreateShardTask)
@@ -131,18 +229,18 @@ func (c *cluster) SaveShardAssign(databaseName string, shardAssign *models.Shard
 		for _, replicaID := range shard.Replicas {
 			taskParam, ok := tasks[replicaID]
 			if !ok {
-				taskParam = &models.CreateShardTask{Database: databaseName}
+				taskParam = &models.CreateShardTask{DatabaseName: databaseName}
 				tasks[replicaID] = taskParam
 			}
-			taskParam.ShardIDs = append(taskParam.ShardIDs, ID)
-			taskParam.ShardOption = shardAssign.Config.ShardOption
+			taskParam.ShardIDs = append(taskParam.ShardIDs, int32(ID))
+			taskParam.DatabaseOption = databaseOption
 		}
 	}
 	var params []task.ControllerTaskParam
 	for nodeID, taskParam := range tasks {
 		node := shardAssign.Nodes[nodeID]
 		params = append(params, task.ControllerTaskParam{
-			NodeID: (&node).String(),
+			NodeID: node.Indicator(),
 			Params: taskParam,
 		})
 	}
@@ -156,33 +254,44 @@ func (c *cluster) SaveShardAssign(databaseName string, shardAssign *models.Shard
 // SubmitTask submits coordinator task based on kind and params into related storage cluster,
 // storage node will execute task if it care this task kind
 func (c *cluster) SubmitTask(kind task.Kind, name string, params []task.ControllerTaskParam) error {
-	return c.controller.Submit(kind, name, params)
+	return c.taskController.Submit(kind, name, params)
 }
 
 // Close stops watch, and cleanups cluster's metadata
 func (c *cluster) Close() {
-	c.mutex.Lock()
-	c.nodes = make(map[string]models.Node)
-	c.databases = make(map[string]*models.DatabaseCluster)
-	c.mutex.Unlock()
-
-	c.discovery.Close()
-	if err := c.repo.Close(); err != nil {
-		c.log.Error("close state repo of storage cluster",
-			logger.String("cluster", c.cfg.Name), logger.Error(err), logger.Stack())
+	log.Info("close storage cluster state machine", logger.String("cluster", c.cfg.cfg.Name))
+	if c.taskController != nil {
+		// need close task controller of current storage cluster
+		if err := c.taskController.Close(); err != nil {
+			log.Error("close task controller", logger.String("cluster", c.cfg.cfg.Name), logger.Error(err))
+		}
 	}
+	if c.discovery != nil {
+		c.discovery.Close()
+	}
+
+	(&c.cfg).clean()
 }
 
 // addNode adds node into active node list
-func (c *cluster) addNode(resource []byte) {
-	node := models.Node{}
-	if err := json.Unmarshal(resource, &node); err != nil {
-		c.log.Error("discovery new storage node but unmarshal error",
+func (c *cluster) addNode(resource []byte) bool {
+	node := &models.ActiveNode{}
+	if err := encoding.JSONUnmarshal(resource, node); err != nil {
+		log.Error("discovery new storage node but unmarshal error",
 			logger.String("data", string(resource)), logger.Error(err))
-		return
+		return false
 	}
 
-	c.mutex.Lock()
-	c.nodes[node.String()] = node
-	c.mutex.Unlock()
+	c.clusterState.AddActiveNode(node)
+	return true
+}
+
+// saveClusterState saves a new storage cluster snapshot into state repo.
+// master do cluster state control, broker node discovery new state snapshot.
+func (c *cluster) saveClusterState() {
+	name := c.cfg.cfg.Name
+	//TODO need to retry when save state error
+	if err := c.cfg.storageStateService.Save(name, c.clusterState); err != nil {
+		log.Error("save storage state error", logger.String("cluster", name), logger.Error(err))
+	}
 }

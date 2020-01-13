@@ -8,14 +8,23 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/eleme/lindb/models"
+	"github.com/lindb/lindb/config"
 
-	"github.com/dgrijalva/jwt-go"
+	jwt "github.com/dgrijalva/jwt-go"
 )
 
-// UserAuthentication represents authentication param
-type UserAuthentication struct {
-	user models.User
+//go:generate mockgen -source=./authentication.go -destination=./authentication_mock.go -package=middleware
+
+type Authentication interface {
+	// CreateLToken returns the authentication token
+	CreateToken(user config.User) (string, error)
+	// Validate validates the token
+	Validate(next http.Handler) http.Handler
+}
+
+// userAuthentication represents user authentication using jwt
+type userAuthentication struct {
+	user config.User
 }
 
 // CustomClaims represents jwt custom claims param
@@ -31,48 +40,48 @@ func (*CustomClaims) Valid() error {
 	return nil
 }
 
-// NewUserAuthentication creates authentication api instance
-func NewUserAuthentication(user models.User) *UserAuthentication {
-	return &UserAuthentication{
+// NewAuthentication creates authentication api instance
+func NewAuthentication(user config.User) Authentication {
+	return &userAuthentication{
 		user: user,
 	}
 }
 
-// ValidateTokenMiddleware creates middleware for user permissions validation by request header Authorization
+// Validate creates middleware for user permissions validation by request header Authorization
 // if not authorization throw error
 // else perform the next action
-func (u *UserAuthentication) ValidateMiddleware(next http.Handler) http.Handler {
+func (u *userAuthentication) Validate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("Authorization")
-		if len(token) == 0 {
-			err := errors.New("header cannot have authorization")
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusInternalServerError)
-			b, _ := json.Marshal(err.Error())
-			_, _ = w.Write(b)
-			return
+		if len(token) > 0 {
+			claims := parseToken(token, u.user)
+			if claims.UserName == u.user.UserName && claims.Password == u.user.Password {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
-		claims, _ := ParseToken(token, u.user)
-		if claims.UserName == u.user.UserName && claims.Password == u.user.Password {
-			next.ServeHTTP(w, r)
-		}
+		err := errors.New("authorization token invalid")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		b, _ := json.Marshal(err.Error())
+		_, _ = w.Write(b)
 	})
 }
 
 // ParseToken returns jwt claims by token
 // get secret key use Md5Encrypt method with username and password
 // then jwt parse token by secret key
-func ParseToken(tokenString string, user models.User) (*CustomClaims, error) {
+func parseToken(tokenString string, user config.User) *CustomClaims {
 	claims := CustomClaims{}
 	cid := Md5Encrypt(user)
 	_, _ = jwt.ParseWithClaims(tokenString, &claims, func(token *jwt.Token) (interface{}, error) {
 		return cid, nil
 	})
-	return &claims, nil
+	return &claims
 }
 
 // CreateLToken returns token use jwt with custom claims
-func CreateToken(user models.User) (string, error) {
+func (u *userAuthentication) CreateToken(user config.User) (string, error) {
 	claims := CustomClaims{
 		UserName: user.UserName,
 		Password: user.Password,
@@ -83,7 +92,7 @@ func CreateToken(user models.User) (string, error) {
 }
 
 // Md5Encrypt returns secret key use Mk5 encryption with username and password
-func Md5Encrypt(user models.User) string {
+func Md5Encrypt(user config.User) string {
 	/* #nosec */
 	md5Encrypt := md5.New()
 	key := fmt.Sprintf("%s/%s", user.UserName, user.Password)

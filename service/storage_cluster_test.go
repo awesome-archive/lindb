@@ -1,51 +1,75 @@
 package service
 
 import (
+	"encoding/json"
+	"fmt"
 	"testing"
 
-	"gopkg.in/check.v1"
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 
-	"github.com/eleme/lindb/mock"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/state"
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/pkg/fileutil"
+	"github.com/lindb/lindb/pkg/state"
 )
 
-type testStorageClusterSRVSuite struct {
-	mock.RepoTestSuite
-}
+func TestStorageClusterService(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer func() {
+		ctrl.Finish()
+		_ = fileutil.RemoveDir(testPath)
+	}()
 
-func TestStorageClusterSRV(t *testing.T) {
-	check.Suite(&testStorageClusterSRVSuite{})
-	check.TestingT(t)
-}
+	repo := state.NewMockRepository(ctrl)
 
-func (ts *testStorageClusterSRVSuite) TestStorageCluster(c *check.C) {
-	repo, _ := state.NewRepo(state.Config{
-		Endpoints: ts.Cluster.Endpoints,
-	})
-
-	cluster := models.StorageCluster{
+	cluster := config.StorageCluster{
 		Name: "test1",
 	}
 	srv := NewStorageClusterService(repo)
-	err := srv.Save(cluster)
+	repo.EXPECT().Put(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+	err := srv.Save(&cluster)
 	if err != nil {
-		c.Fatal(err)
+		t.Fatal(err)
 	}
-	err = srv.Save(models.StorageCluster{})
-	c.Assert(err, check.NotNil)
 
+	err = srv.Save(&config.StorageCluster{})
+	assert.NotNil(t, err)
+	repo.EXPECT().Put(gomock.Any(), gomock.Any(), gomock.Any()).Return(fmt.Errorf("err"))
+	err = srv.Save(&cluster)
+	assert.NotNil(t, err)
+
+	data, _ := json.Marshal(cluster)
+	repo.EXPECT().Get(gomock.Any(), gomock.Any()).Return(data, nil)
 	cluster2, _ := srv.Get("test1")
-	c.Assert(cluster, check.DeepEquals, cluster2)
+	assert.Equal(t, cluster, *cluster2)
 
-	_ = srv.Save(models.StorageCluster{
+	repo.EXPECT().Get(gomock.Any(), gomock.Any()).Return([]byte{1, 2, 3}, nil)
+	cluster2, err = srv.Get("test1")
+	assert.NotNil(t, err)
+	assert.Nil(t, cluster2)
+
+	repo.EXPECT().Get(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("err"))
+	cluster2, err = srv.Get("test1_err")
+	assert.NotNil(t, err)
+	assert.Nil(t, cluster2)
+
+	repo.EXPECT().Put(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
+	_ = srv.Save(&config.StorageCluster{
 		Name: "test2",
 	})
+
+	repo.EXPECT().List(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("err"))
+	_, err1 := srv.List()
+	assert.NotNil(t, err1)
+
+	repo.EXPECT().List(gomock.Any(), gomock.Any()).Return([]state.KeyValue{
+		{Key: "data1", Value: data},
+		{Key: "data2", Value: data},
+		{Key: "data_err", Value: []byte{1, 2, 2}},
+	}, nil)
 	clusterList, _ := srv.List()
-	c.Assert(len(clusterList), check.Equals, 2)
+	assert.Equal(t, 2, len(clusterList))
 
+	repo.EXPECT().Delete(gomock.Any(), gomock.Any()).Return(nil)
 	_ = srv.Delete("test1")
-
-	_, err2 := srv.Get("test1")
-	c.Assert(err2, check.NotNil)
 }

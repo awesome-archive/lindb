@@ -2,21 +2,44 @@ syntax = "proto3";
 
 package common;
 
-message Request {
-    bytes data = 1;
+enum TaskType {
+    UNKNOWN = 0;
+    Intermediate = 1;
+    Leaf = 2;
 }
 
-message Response {
-    int32 code = 1;
-    string msg = 2;
-    bytes data = 3;
+enum RequestType {
+    Data = 0;
+    Metadata = 1;
 }
 
+message TaskRequest {
+    int64 jobID = 1;
+    string parentTaskID = 2;
+    TaskType type = 3;
+    RequestType requestType = 4;
+    bytes physicalPlan = 5;
+    bytes payload = 6;
+}
 
+message TaskResponse {
+    int64 jobID = 1;
+    string TaskID = 2;
+    bool completed = 3;
+    string errMsg = 4;
+    bytes payload = 5;
+}
 
+message TimeSeriesList {
+    repeated TimeSeries timeSeriesList = 1;
+}
 
+message TimeSeries {
+    string tags = 1; // tag values contact string
+    map<string, bytes> fields = 2;
+}
 
-
-
-
-
+service TaskService {
+    rpc Handle (stream TaskRequest) returns (stream TaskResponse) {
+    }
+}

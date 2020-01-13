@@ -2,55 +2,53 @@ package encoding
 
 import (
 	"bytes"
-	"encoding/binary"
 	"math/bits"
 
-	"github.com/eleme/lindb/pkg/bit"
+	"github.com/lindb/lindb/pkg/bit"
+	"github.com/lindb/lindb/pkg/bufioutil"
+	"github.com/lindb/lindb/pkg/stream"
 )
 
-//parquet delta encoding https://github.com/apache/parquet-format/blob/master/Encodings.md#RLE
-//<num of values -1(exclude first value)><min delta><bit width of max value(delta of min delta)><list of deltas>
-//for singed values, use zigzag encoding(https://developers.google.com/protocol-buffers/docs/encoding#signed-integers)
+// reference:
+// parquet delta encoding https://github.com/apache/parquet-format/blob/master/Encodings.md#RLE
+// <num of values -1(exclude first value)><min delta><bit width of max value(delta of min delta)><list of deltas>
+// for singed values, use zigzag encoding(https://developers.google.com/protocol-buffers/docs/encoding#signed-integers)
 
+// DeltaBitPackingEncoder represents a delta encoding for int32
 type DeltaBitPackingEncoder struct {
 	first    int32
 	previous int32
 	minDelta int32
 	deltas   []int32
-
+	buffer   *bytes.Buffer
+	sw       *stream.BufferWriter
+	bw       *bit.Writer
 	hasFirst bool
 }
 
-type DeltaBitPackingDecoder struct {
-	buf      *bytes.Buffer
-	br       *bit.Reader
-	count    int64
-	pos      int64
-	width    int
-	previous int32
-	minDelta int32
-}
-
+// NewDeltaBitPackingEncoder creates a delta encoder
 func NewDeltaBitPackingEncoder() *DeltaBitPackingEncoder {
-	return &DeltaBitPackingEncoder{}
+	var buffer bytes.Buffer
+	return &DeltaBitPackingEncoder{
+		buffer: &buffer,
+		sw:     stream.NewBufferWriter(&buffer),
+		bw:     bit.NewWriter(&buffer)}
 }
 
-func NewDeltaBitPackingDecoder(buf *[]byte) *DeltaBitPackingDecoder {
-	d := &DeltaBitPackingDecoder{
-		buf: bytes.NewBuffer(*buf),
-	}
-	x, _ := binary.ReadVarint(d.buf)
-	d.count = x + 1
-	d.pos = d.count
-	w, _ := d.buf.ReadByte()
-	d.width = int(w)
+// Reset clears the underlying data structure to prepare for next use
+func (p *DeltaBitPackingEncoder) Reset() {
+	p.buffer.Reset()
+	p.sw.Reset()
+	p.bw.Reset(p.buffer)
 
-	min, _ := binary.ReadVarint(d.buf)
-	d.minDelta = int32(ZigZagDecode(uint64(min)))
-	d.br = bit.NewReader(d.buf)
-	return d
+	p.hasFirst = false
+	p.first = 0
+	p.previous = 0
+	p.minDelta = 0
+	p.deltas = p.deltas[:0]
 }
 
+// Add adds a new int value
 func (p *DeltaBitPackingEncoder) Add(v int32) {
 	if !p.hasFirst {
 		p.hasFirst = true
@@ -69,15 +67,14 @@ func (p *DeltaBitPackingEncoder) Add(v int32) {
 	p.previous = v
 }
 
-func (p *DeltaBitPackingEncoder) Bytes() ([]byte, error) {
-	var scratch [binary.MaxVarintLen64]byte
-	var buf bytes.Buffer
-	n := binary.PutVarint(scratch[:], int64(len(p.deltas)))
-	if _, err := buf.Write(scratch[:n]); err != nil {
-		return nil, err
-	}
+// Bytes returns binary data
+func (p *DeltaBitPackingEncoder) Bytes() []byte {
+	var (
+		max int32
+	)
+	p.buffer.Reset()
 
-	var max int32
+	p.sw.PutVarint32(int32(len(p.deltas))) // write deltas length
 	for _, v := range p.deltas {
 		deltaDelta := v - p.minDelta
 		if max < deltaDelta {
@@ -85,41 +82,74 @@ func (p *DeltaBitPackingEncoder) Bytes() ([]byte, error) {
 		}
 	}
 	width := 32 - bits.LeadingZeros32(uint32(max))
-	buf.WriteByte(byte(width))
-	n1 := binary.PutVarint(scratch[:], int64(ZigZagEncode(int64(p.minDelta))))
-	if _, err := buf.Write(scratch[:n1]); err != nil {
-		return nil, err
-	}
+	p.sw.PutByte(byte(width))                                // width
+	p.sw.PutVarint64(int64(ZigZagEncode(int64(p.minDelta)))) // min delta
+	p.sw.PutVarint32(p.first)                                // first value
 
-	n2 := binary.PutVarint(scratch[:], int64(p.first))
-	if _, err := buf.Write(scratch[:n2]); err != nil {
-		return nil, err
-	}
-
-	bw := bit.NewWriter(&buf)
 	for _, v := range p.deltas {
 		deltaDelta := v - p.minDelta
-		err := bw.WriteBits(uint64(deltaDelta), width)
-		if err != nil {
-			return nil, err
-		}
+		_ = p.bw.WriteBits(uint64(deltaDelta), width)
 	}
 
-	bw.Flush()
-	return buf.Bytes(), nil
+	_ = p.bw.Flush()
+	return p.buffer.Bytes()
 }
 
+// DeltaBitPackingDecoder represents a delta decoding for int32
+type DeltaBitPackingDecoder struct {
+	sr       *stream.Reader
+	br       *bit.Reader
+	buf      *bufioutil.Buffer
+	count    int32
+	pos      int32
+	width    int
+	previous int32
+	minDelta int32
+}
+
+// NewDeltaBitPackingDecoder creates a delta decoder
+func NewDeltaBitPackingDecoder(buf []byte) *DeltaBitPackingDecoder {
+	d := &DeltaBitPackingDecoder{
+		sr: stream.NewReader(nil),
+	}
+	d.buf = bufioutil.NewBuffer(buf)
+	d.br = bit.NewReader(d.buf)
+
+	d.Reset(buf)
+	return d
+}
+
+func (d *DeltaBitPackingDecoder) Reset(buf []byte) {
+	d.sr.Reset(buf)
+	x := d.sr.ReadVarint32() // deltas length
+	d.count = x + 1
+	d.pos = d.count
+	w := d.sr.ReadByte() // width
+	d.width = int(w)
+	min := d.sr.ReadVarint64()
+	d.minDelta = int32(ZigZagDecode(uint64(min))) // min delta
+
+	// need read first value
+	v := d.sr.ReadVarint32()
+	d.previous = v
+	pos := d.sr.Position()
+
+	d.buf.SetBuf(buf[pos:])
+
+	// reset bit stream
+	d.br.Reset()
+}
+
+// HasNext tests if has more int32 value
 func (d *DeltaBitPackingDecoder) HasNext() bool {
 	return d.pos > 0
 }
 
+// Next returns next value if exist
 func (d *DeltaBitPackingDecoder) Next() int32 {
 	if d.pos == d.count {
-		x, _ := binary.ReadVarint(d.buf)
 		d.pos--
-		v := int32(x)
-		d.previous = v
-		return v
+		return d.previous
 	}
 	x, _ := d.br.ReadBits(d.width)
 	d.pos--

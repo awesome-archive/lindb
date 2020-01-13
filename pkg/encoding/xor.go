@@ -1,10 +1,9 @@
 package encoding
 
 import (
-	"bytes"
 	"math/bits"
 
-	"github.com/eleme/lindb/pkg/bit"
+	"github.com/lindb/lindb/pkg/bit"
 )
 
 // reference facebook gorilla paper(https://www.vldb.org/pvldb/vol8/p1816-teller.pdf)
@@ -14,29 +13,30 @@ const firstValueLen = 64
 
 // XOREncoder encodes uint64 value using xor compress
 type XOREncoder struct {
+	bw *bit.Writer
+
 	previousVal uint64
+	leading     int
+	trailing    int
 
-	buf bytes.Buffer
-	bw  *bit.Writer
-
-	leading  int
-	trailing int
-
-	first  bool
-	finish bool
-
-	err error
+	first bool
+	err   error
 }
 
 // NewXOREncoder creates xor encoder for compressing uint64 data
-func NewXOREncoder() *XOREncoder {
-	s := &XOREncoder{
-		first:   true,
-		leading: int(^uint8(0)),
+func NewXOREncoder(bw *bit.Writer) *XOREncoder {
+	return &XOREncoder{
+		bw:    bw,
+		first: true,
 	}
-	// new bit writer
-	s.bw = bit.NewWriter(&s.buf)
-	return s
+}
+
+func (e *XOREncoder) Reset() {
+	e.previousVal = 0
+	e.leading = int(^uint8(0))
+	e.trailing = 0
+	e.first = true
+	e.err = nil
 }
 
 // Write writs uint64 v to underlying buffer, using xor compress
@@ -98,21 +98,10 @@ func (e *XOREncoder) Write(val uint64) error {
 	return nil
 }
 
-// Bytes returns a copy of the underlying byte buffer
-func (e *XOREncoder) Bytes() ([]byte, error) {
-	e.finish = true
-	err := e.bw.Flush()
-	if nil != err {
-		return nil, err
-	}
-	return e.buf.Bytes(), err
-}
-
 // XORDecoder decodes buffer to uint64 values using xor compress
 type XORDecoder struct {
 	val uint64
 
-	b  []byte
 	br *bit.Reader
 
 	leading  uint64
@@ -123,13 +112,21 @@ type XORDecoder struct {
 }
 
 // NewXORDecoder create decoder uncompress buffer using xor
-func NewXORDecoder(b []byte) *XORDecoder {
+func NewXORDecoder(br *bit.Reader) *XORDecoder {
 	s := &XORDecoder{
-		b:     b,
+		br:    br,
 		first: true,
 	}
-	s.br = bit.NewReader(bytes.NewBuffer(b))
 	return s
+}
+
+// Reset resets the underlying buffer to decode
+func (d *XORDecoder) Reset() {
+	d.first = true
+	d.leading = 0
+	d.trailing = 0
+	d.err = nil
+	d.val = 0
 }
 
 // Next return if has value in buffer using xor, do uncompress logic in next method,

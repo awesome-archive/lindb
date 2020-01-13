@@ -9,11 +9,7 @@ import (
 // GetJSONBodyFromRequest gets json from request body and then parses into specified struct
 func GetJSONBodyFromRequest(r *http.Request, t interface{}) error {
 	decoder := json.NewDecoder(r.Body)
-	if decoder != nil {
-		err := decoder.Decode(&t)
-		return err
-	}
-	return fmt.Errorf("could not parse request body")
+	return decoder.Decode(&t)
 }
 
 // GetParamsFromRequest gets parameter value from the request。
@@ -38,14 +34,14 @@ func GetParamsFromRequest(paramsName string, r *http.Request, defaultValue strin
 			value = values[0]
 		}
 	// the parameter value need to be parsed from the url when the request method is GET
-	case http.MethodGet, http.MethodDelete:
+	case http.MethodGet, http.MethodDelete, http.MethodPut:
 		values := r.URL.Query()[paramsName]
 		if len(values) > 0 {
 			value = values[0]
 		}
 	// default return error
 	default:
-		return "", fmt.Errorf("only GET/POST/DELETE methods are supported")
+		return "", fmt.Errorf("only GET/POST/DELETE/PUT methods are supported")
 	}
 	if len(value) > 0 {
 		return value, nil
@@ -53,5 +49,5 @@ func GetParamsFromRequest(paramsName string, r *http.Request, defaultValue strin
 	if !required {
 		return defaultValue, nil
 	}
-	return "", fmt.Errorf("could not find the param;[%s] values ", paramsName)
+	return "", fmt.Errorf("please input %s", paramsName)
 }

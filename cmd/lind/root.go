@@ -4,16 +4,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const linDBLogo = `
+██╗     ██╗███╗   ██╗██████╗ ██████╗ 
+██║     ██║████╗  ██║██╔══██╗██╔══██╗
+██║     ██║██╔██╗ ██║██║  ██║██████╔╝
+██║     ██║██║╚██╗██║██║  ██║██╔══██╗
+███████╗██║██║ ╚████║██████╔╝██████╔╝
+╚══════╝╚═╝╚═╝  ╚═══╝╚═════╝ ╚═════╝ 
+`
+
 const (
 	linDBText = `
-    __     _             ____     ____ 
-   / /    (_)   ____    / __ \   / __ )
-  / /    / /   / __ \  / / / /  / __  |
- / /___ / /   / / / / / /_/ /  / /_/ / 
-/_____//_/   /_/ /_/ /_____/  /_____/  
-
-LinDB is a scalable, distributed, high performance, high availability Time Series Database, produced by Eleme-CI.
-Complete documentation is available at https://github.com/eleme/lindb
+LinDB is a scalable, high performance, high availability, distributed time series database.
+Complete documentation is available at https://lindb.io
 `
 )
 
@@ -21,7 +24,7 @@ Complete documentation is available at https://github.com/eleme/lindb
 var RootCmd = &cobra.Command{
 	Use:   "lind",
 	Short: "lind is the main command, used to control LinDB",
-	Long:  linDBText,
+	Long:  linDBLogo + linDBText,
 }
 
 func init() {
@@ -30,5 +33,6 @@ func init() {
 		versionCmd,
 		newStorageCmd(),
 		newBrokerCmd(),
+		newStandaloneCmd(),
 	)
 }

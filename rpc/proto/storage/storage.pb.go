@@ -6,10 +6,13 @@ package storage
 import (
 	context "context"
 	fmt "fmt"
-	common "github.com/eleme/lindb/rpc/proto/common"
 	proto "github.com/golang/protobuf/proto"
 	grpc "google.golang.org/grpc"
+	codes "google.golang.org/grpc/codes"
+	status "google.golang.org/grpc/status"
+	io "io"
 	math "math"
+	math_bits "math/bits"
 )
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -23,18 +26,480 @@ var _ = math.Inf
 // proto package needs to be updated.
 const _ = proto.ProtoPackageIsVersion2 // please upgrade the proto package
 
+type Replica struct {
+	Seq                  int64    `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Data                 []byte   `protobuf:"bytes,2,opt,name=data,proto3" json:"data,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *Replica) Reset()         { *m = Replica{} }
+func (m *Replica) String() string { return proto.CompactTextString(m) }
+func (*Replica) ProtoMessage()    {}
+func (*Replica) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0d2c4ccf1453ffdb, []int{0}
+}
+func (m *Replica) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *Replica) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_Replica.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *Replica) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Replica.Merge(m, src)
+}
+func (m *Replica) XXX_Size() int {
+	return m.Size()
+}
+func (m *Replica) XXX_DiscardUnknown() {
+	xxx_messageInfo_Replica.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Replica proto.InternalMessageInfo
+
+func (m *Replica) GetSeq() int64 {
+	if m != nil {
+		return m.Seq
+	}
+	return 0
+}
+
+func (m *Replica) GetData() []byte {
+	if m != nil {
+		return m.Data
+	}
+	return nil
+}
+
+type WriteRequest struct {
+	Replicas             []*Replica `protobuf:"bytes,1,rep,name=replicas,proto3" json:"replicas,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}   `json:"-"`
+	XXX_unrecognized     []byte     `json:"-"`
+	XXX_sizecache        int32      `json:"-"`
+}
+
+func (m *WriteRequest) Reset()         { *m = WriteRequest{} }
+func (m *WriteRequest) String() string { return proto.CompactTextString(m) }
+func (*WriteRequest) ProtoMessage()    {}
+func (*WriteRequest) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0d2c4ccf1453ffdb, []int{1}
+}
+func (m *WriteRequest) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *WriteRequest) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_WriteRequest.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *WriteRequest) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_WriteRequest.Merge(m, src)
+}
+func (m *WriteRequest) XXX_Size() int {
+	return m.Size()
+}
+func (m *WriteRequest) XXX_DiscardUnknown() {
+	xxx_messageInfo_WriteRequest.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_WriteRequest proto.InternalMessageInfo
+
+func (m *WriteRequest) GetReplicas() []*Replica {
+	if m != nil {
+		return m.Replicas
+	}
+	return nil
+}
+
+// if replica seq does not match with the seq num in storage, return error.
+// The broker will re-construct the stream, negotiation with the storage side.
+type WriteResponse struct {
+	// current max sequence num received, used for client to control sliding window
+	CurSeq int64 `protobuf:"varint,1,opt,name=curSeq,proto3" json:"curSeq,omitempty"`
+	// oneof means one of almost one item, could be null
+	// if ackSeq is provided, the broker ack the seq,
+	//
+	// Types that are valid to be assigned to Ack:
+	//	*WriteResponse_AckSeq
+	Ack                  isWriteResponse_Ack `protobuf_oneof:"ack"`
+	XXX_NoUnkeyedLiteral struct{}            `json:"-"`
+	XXX_unrecognized     []byte              `json:"-"`
+	XXX_sizecache        int32               `json:"-"`
+}
+
+func (m *WriteResponse) Reset()         { *m = WriteResponse{} }
+func (m *WriteResponse) String() string { return proto.CompactTextString(m) }
+func (*WriteResponse) ProtoMessage()    {}
+func (*WriteResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0d2c4ccf1453ffdb, []int{2}
+}
+func (m *WriteResponse) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *WriteResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_WriteResponse.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *WriteResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_WriteResponse.Merge(m, src)
+}
+func (m *WriteResponse) XXX_Size() int {
+	return m.Size()
+}
+func (m *WriteResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_WriteResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_WriteResponse proto.InternalMessageInfo
+
+type isWriteResponse_Ack interface {
+	isWriteResponse_Ack()
+	MarshalTo([]byte) (int, error)
+	Size() int
+}
+
+type WriteResponse_AckSeq struct {
+	AckSeq int64 `protobuf:"varint,2,opt,name=ackSeq,proto3,oneof"`
+}
+
+func (*WriteResponse_AckSeq) isWriteResponse_Ack() {}
+
+func (m *WriteResponse) GetAck() isWriteResponse_Ack {
+	if m != nil {
+		return m.Ack
+	}
+	return nil
+}
+
+func (m *WriteResponse) GetCurSeq() int64 {
+	if m != nil {
+		return m.CurSeq
+	}
+	return 0
+}
+
+func (m *WriteResponse) GetAckSeq() int64 {
+	if x, ok := m.GetAck().(*WriteResponse_AckSeq); ok {
+		return x.AckSeq
+	}
+	return 0
+}
+
+// XXX_OneofFuncs is for the internal use of the proto package.
+func (*WriteResponse) XXX_OneofFuncs() (func(msg proto.Message, b *proto.Buffer) error, func(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error), func(msg proto.Message) (n int), []interface{}) {
+	return _WriteResponse_OneofMarshaler, _WriteResponse_OneofUnmarshaler, _WriteResponse_OneofSizer, []interface{}{
+		(*WriteResponse_AckSeq)(nil),
+	}
+}
+
+func _WriteResponse_OneofMarshaler(msg proto.Message, b *proto.Buffer) error {
+	m := msg.(*WriteResponse)
+	// ack
+	switch x := m.Ack.(type) {
+	case *WriteResponse_AckSeq:
+		_ = b.EncodeVarint(2<<3 | proto.WireVarint)
+		_ = b.EncodeVarint(uint64(x.AckSeq))
+	case nil:
+	default:
+		return fmt.Errorf("WriteResponse.Ack has unexpected type %T", x)
+	}
+	return nil
+}
+
+func _WriteResponse_OneofUnmarshaler(msg proto.Message, tag, wire int, b *proto.Buffer) (bool, error) {
+	m := msg.(*WriteResponse)
+	switch tag {
+	case 2: // ack.ackSeq
+		if wire != proto.WireVarint {
+			return true, proto.ErrInternalBadWireType
+		}
+		x, err := b.DecodeVarint()
+		m.Ack = &WriteResponse_AckSeq{int64(x)}
+		return true, err
+	default:
+		return false, nil
+	}
+}
+
+func _WriteResponse_OneofSizer(msg proto.Message) (n int) {
+	m := msg.(*WriteResponse)
+	// ack
+	switch x := m.Ack.(type) {
+	case *WriteResponse_AckSeq:
+		n += 1 // tag and wire
+		n += proto.SizeVarint(uint64(x.AckSeq))
+	case nil:
+	default:
+		panic(fmt.Sprintf("proto: unexpected type %T in oneof", x))
+	}
+	return n
+}
+
+type ResetSeqRequest struct {
+	Database             string   `protobuf:"bytes,1,opt,name=database,proto3" json:"database,omitempty"`
+	ShardID              int32    `protobuf:"varint,2,opt,name=shardID,proto3" json:"shardID,omitempty"`
+	Seq                  int64    `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *ResetSeqRequest) Reset()         { *m = ResetSeqRequest{} }
+func (m *ResetSeqRequest) String() string { return proto.CompactTextString(m) }
+func (*ResetSeqRequest) ProtoMessage()    {}
+func (*ResetSeqRequest) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0d2c4ccf1453ffdb, []int{3}
+}
+func (m *ResetSeqRequest) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ResetSeqRequest) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_ResetSeqRequest.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *ResetSeqRequest) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ResetSeqRequest.Merge(m, src)
+}
+func (m *ResetSeqRequest) XXX_Size() int {
+	return m.Size()
+}
+func (m *ResetSeqRequest) XXX_DiscardUnknown() {
+	xxx_messageInfo_ResetSeqRequest.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ResetSeqRequest proto.InternalMessageInfo
+
+func (m *ResetSeqRequest) GetDatabase() string {
+	if m != nil {
+		return m.Database
+	}
+	return ""
+}
+
+func (m *ResetSeqRequest) GetShardID() int32 {
+	if m != nil {
+		return m.ShardID
+	}
+	return 0
+}
+
+func (m *ResetSeqRequest) GetSeq() int64 {
+	if m != nil {
+		return m.Seq
+	}
+	return 0
+}
+
+type ResetSeqResponse struct {
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *ResetSeqResponse) Reset()         { *m = ResetSeqResponse{} }
+func (m *ResetSeqResponse) String() string { return proto.CompactTextString(m) }
+func (*ResetSeqResponse) ProtoMessage()    {}
+func (*ResetSeqResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0d2c4ccf1453ffdb, []int{4}
+}
+func (m *ResetSeqResponse) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ResetSeqResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_ResetSeqResponse.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *ResetSeqResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ResetSeqResponse.Merge(m, src)
+}
+func (m *ResetSeqResponse) XXX_Size() int {
+	return m.Size()
+}
+func (m *ResetSeqResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_ResetSeqResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ResetSeqResponse proto.InternalMessageInfo
+
+type NextSeqRequest struct {
+	Database             string   `protobuf:"bytes,1,opt,name=database,proto3" json:"database,omitempty"`
+	ShardID              int32    `protobuf:"varint,2,opt,name=shardID,proto3" json:"shardID,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *NextSeqRequest) Reset()         { *m = NextSeqRequest{} }
+func (m *NextSeqRequest) String() string { return proto.CompactTextString(m) }
+func (*NextSeqRequest) ProtoMessage()    {}
+func (*NextSeqRequest) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0d2c4ccf1453ffdb, []int{5}
+}
+func (m *NextSeqRequest) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *NextSeqRequest) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_NextSeqRequest.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *NextSeqRequest) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_NextSeqRequest.Merge(m, src)
+}
+func (m *NextSeqRequest) XXX_Size() int {
+	return m.Size()
+}
+func (m *NextSeqRequest) XXX_DiscardUnknown() {
+	xxx_messageInfo_NextSeqRequest.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_NextSeqRequest proto.InternalMessageInfo
+
+func (m *NextSeqRequest) GetDatabase() string {
+	if m != nil {
+		return m.Database
+	}
+	return ""
+}
+
+func (m *NextSeqRequest) GetShardID() int32 {
+	if m != nil {
+		return m.ShardID
+	}
+	return 0
+}
+
+type NextSeqResponse struct {
+	Seq                  int64    `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *NextSeqResponse) Reset()         { *m = NextSeqResponse{} }
+func (m *NextSeqResponse) String() string { return proto.CompactTextString(m) }
+func (*NextSeqResponse) ProtoMessage()    {}
+func (*NextSeqResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_0d2c4ccf1453ffdb, []int{6}
+}
+func (m *NextSeqResponse) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *NextSeqResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_NextSeqResponse.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *NextSeqResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_NextSeqResponse.Merge(m, src)
+}
+func (m *NextSeqResponse) XXX_Size() int {
+	return m.Size()
+}
+func (m *NextSeqResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_NextSeqResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_NextSeqResponse proto.InternalMessageInfo
+
+func (m *NextSeqResponse) GetSeq() int64 {
+	if m != nil {
+		return m.Seq
+	}
+	return 0
+}
+
+func init() {
+	proto.RegisterType((*Replica)(nil), "storage.Replica")
+	proto.RegisterType((*WriteRequest)(nil), "storage.WriteRequest")
+	proto.RegisterType((*WriteResponse)(nil), "storage.WriteResponse")
+	proto.RegisterType((*ResetSeqRequest)(nil), "storage.ResetSeqRequest")
+	proto.RegisterType((*ResetSeqResponse)(nil), "storage.ResetSeqResponse")
+	proto.RegisterType((*NextSeqRequest)(nil), "storage.NextSeqRequest")
+	proto.RegisterType((*NextSeqResponse)(nil), "storage.NextSeqResponse")
+}
+
 func init() { proto.RegisterFile("storage.proto", fileDescriptor_0d2c4ccf1453ffdb) }
 
 var fileDescriptor_0d2c4ccf1453ffdb = []byte{
-	// 128 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0xe2, 0x2d, 0x2e, 0xc9, 0x2f,
-	0x4a, 0x4c, 0x4f, 0xd5, 0x2b, 0x28, 0xca, 0x2f, 0xc9, 0x17, 0x62, 0x87, 0x72, 0xa5, 0x78, 0x92,
-	0xf3, 0x73, 0x73, 0xf3, 0xf3, 0x20, 0xc2, 0x46, 0x4e, 0x5c, 0x3c, 0xe1, 0x45, 0x99, 0x25, 0xa9,
-	0xc1, 0xa9, 0x45, 0x65, 0x99, 0xc9, 0xa9, 0x42, 0x46, 0x5c, 0xdc, 0x60, 0x7e, 0x40, 0x7e, 0x66,
-	0x5e, 0x49, 0xb1, 0x10, 0xbf, 0x1e, 0x54, 0x75, 0x50, 0x6a, 0x61, 0x69, 0x6a, 0x71, 0x89, 0x94,
-	0x00, 0x42, 0xa0, 0xb8, 0x20, 0x3f, 0xaf, 0x38, 0x55, 0x89, 0xc1, 0x49, 0xe0, 0xc4, 0x23, 0x39,
-	0xc6, 0x0b, 0x8f, 0xe4, 0x18, 0x1f, 0x3c, 0x92, 0x63, 0x9c, 0xf1, 0x58, 0x8e, 0x21, 0x89, 0x0d,
-	0x6c, 0xb8, 0x31, 0x20, 0x00, 0x00, 0xff, 0xff, 0x94, 0xa0, 0xeb, 0xe1, 0x84, 0x00, 0x00, 0x00,
+	// 343 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xa4, 0x52, 0x41, 0x4f, 0xf2, 0x40,
+	0x10, 0x65, 0xbf, 0x52, 0xe0, 0x1b, 0x41, 0x9a, 0x49, 0xc4, 0xda, 0x43, 0x43, 0xd6, 0x4b, 0x0f,
+	0x06, 0x0d, 0x1e, 0x25, 0x1e, 0x88, 0x31, 0x78, 0xf1, 0xb0, 0x1c, 0x8c, 0xc7, 0xa5, 0x4c, 0x94,
+	0x60, 0x2c, 0xec, 0x16, 0xe3, 0x4f, 0xf1, 0x27, 0xe9, 0xcd, 0x9f, 0x60, 0xf0, 0x8f, 0x98, 0x96,
+	0xed, 0x0a, 0xe2, 0xcd, 0xdb, 0xbe, 0xdd, 0x99, 0xf7, 0xde, 0xbc, 0x59, 0x68, 0xe8, 0x34, 0x51,
+	0xf2, 0x8e, 0x3a, 0x33, 0x95, 0xa4, 0x09, 0x56, 0x0d, 0xe4, 0xc7, 0x50, 0x15, 0x34, 0x7b, 0x98,
+	0xc4, 0x12, 0x3d, 0x70, 0x34, 0xcd, 0x7d, 0xd6, 0x66, 0x91, 0x23, 0xb2, 0x23, 0x22, 0x94, 0xc7,
+	0x32, 0x95, 0xfe, 0xbf, 0x36, 0x8b, 0xea, 0x22, 0x3f, 0xf3, 0x1e, 0xd4, 0x6f, 0xd4, 0x24, 0x25,
+	0x41, 0xf3, 0x05, 0xe9, 0x14, 0x8f, 0xa0, 0xa6, 0x56, 0x04, 0xda, 0x67, 0x6d, 0x27, 0xda, 0xe9,
+	0x7a, 0x9d, 0x42, 0xcb, 0x30, 0x0b, 0x5b, 0xc1, 0x07, 0xd0, 0x30, 0xdd, 0x7a, 0x96, 0x3c, 0x6a,
+	0xc2, 0x16, 0x54, 0xe2, 0x85, 0x1a, 0x5a, 0x5d, 0x83, 0xd0, 0x87, 0x8a, 0x8c, 0xa7, 0xd9, 0x7d,
+	0x26, 0xee, 0x0c, 0x4a, 0xc2, 0xe0, 0xbe, 0x0b, 0x8e, 0x8c, 0xa7, 0xfc, 0x16, 0x9a, 0x82, 0x34,
+	0xa5, 0x43, 0x9a, 0x17, 0x56, 0x02, 0xa8, 0x65, 0x16, 0x47, 0x52, 0x53, 0xce, 0xf6, 0x5f, 0x58,
+	0x8c, 0x3e, 0x54, 0xf5, 0xbd, 0x54, 0xe3, 0xab, 0x8b, 0x9c, 0xd0, 0x15, 0x05, 0x2c, 0xc6, 0x76,
+	0xec, 0xd8, 0x1c, 0xc1, 0xfb, 0xa6, 0x5e, 0xf9, 0xe4, 0x97, 0xb0, 0x7b, 0x4d, 0xcf, 0x7f, 0x56,
+	0xe3, 0x87, 0xd0, 0xb4, 0x3c, 0x26, 0x82, 0xad, 0xdc, 0xbb, 0x6f, 0xcc, 0x84, 0x3c, 0x24, 0xf5,
+	0x34, 0x89, 0x09, 0x7b, 0xe0, 0xe6, 0x18, 0xf7, 0x6c, 0xb6, 0xeb, 0x4b, 0x08, 0x5a, 0x3f, 0xaf,
+	0x8d, 0xeb, 0x52, 0xc4, 0x4e, 0x18, 0x9e, 0x83, 0x9b, 0xcf, 0x83, 0xfe, 0xda, 0x66, 0x36, 0xa2,
+	0x0b, 0x0e, 0x7e, 0x79, 0x29, 0x38, 0xf0, 0x0c, 0xca, 0x99, 0x67, 0xdc, 0xb7, 0x45, 0x9b, 0x51,
+	0x04, 0xfe, 0xf6, 0x43, 0xd1, 0xdc, 0xf7, 0x5e, 0x97, 0x21, 0x7b, 0x5f, 0x86, 0xec, 0x63, 0x19,
+	0xb2, 0x97, 0xcf, 0xb0, 0x34, 0xaa, 0xe4, 0x5f, 0xf0, 0xf4, 0x2b, 0x00, 0x00, 0xff, 0xff, 0x1a,
+	0x8c, 0xd2, 0xc9, 0x93, 0x02, 0x00, 0x00,
 }
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -49,7 +514,9 @@ const _ = grpc.SupportPackageIsVersion4
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://godoc.org/google.golang.org/grpc#ClientConn.NewStream.
 type WriteServiceClient interface {
-	WritePoints(ctx context.Context, in *common.Request, opts ...grpc.CallOption) (*common.Response, error)
+	Write(ctx context.Context, opts ...grpc.CallOption) (WriteService_WriteClient, error)
+	Reset(ctx context.Context, in *ResetSeqRequest, opts ...grpc.CallOption) (*ResetSeqResponse, error)
+	Next(ctx context.Context, in *NextSeqRequest, opts ...grpc.CallOption) (*NextSeqResponse, error)
 }
 
 type writeServiceClient struct {
@@ -60,9 +527,49 @@ func NewWriteServiceClient(cc *grpc.ClientConn) WriteServiceClient {
 	return &writeServiceClient{cc}
 }
 
-func (c *writeServiceClient) WritePoints(ctx context.Context, in *common.Request, opts ...grpc.CallOption) (*common.Response, error) {
-	out := new(common.Response)
-	err := c.cc.Invoke(ctx, "/storage.WriteService/WritePoints", in, out, opts...)
+func (c *writeServiceClient) Write(ctx context.Context, opts ...grpc.CallOption) (WriteService_WriteClient, error) {
+	stream, err := c.cc.NewStream(ctx, &_WriteService_serviceDesc.Streams[0], "/storage.WriteService/Write", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &writeServiceWriteClient{stream}
+	return x, nil
+}
+
+type WriteService_WriteClient interface {
+	Send(*WriteRequest) error
+	Recv() (*WriteResponse, error)
+	grpc.ClientStream
+}
+
+type writeServiceWriteClient struct {
+	grpc.ClientStream
+}
+
+func (x *writeServiceWriteClient) Send(m *WriteRequest) error {
+	return x.ClientStream.SendMsg(m)
+}
+
+func (x *writeServiceWriteClient) Recv() (*WriteResponse, error) {
+	m := new(WriteResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func (c *writeServiceClient) Reset(ctx context.Context, in *ResetSeqRequest, opts ...grpc.CallOption) (*ResetSeqResponse, error) {
+	out := new(ResetSeqResponse)
+	err := c.cc.Invoke(ctx, "/storage.WriteService/Reset", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *writeServiceClient) Next(ctx context.Context, in *NextSeqRequest, opts ...grpc.CallOption) (*NextSeqResponse, error) {
+	out := new(NextSeqResponse)
+	err := c.cc.Invoke(ctx, "/storage.WriteService/Next", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -71,27 +578,87 @@ func (c *writeServiceClient) WritePoints(ctx context.Context, in *common.Request
 
 // WriteServiceServer is the server API for WriteService service.
 type WriteServiceServer interface {
-	WritePoints(context.Context, *common.Request) (*common.Response, error)
+	Write(WriteService_WriteServer) error
+	Reset(context.Context, *ResetSeqRequest) (*ResetSeqResponse, error)
+	Next(context.Context, *NextSeqRequest) (*NextSeqResponse, error)
+}
+
+// UnimplementedWriteServiceServer can be embedded to have forward compatible implementations.
+type UnimplementedWriteServiceServer struct {
+}
+
+func (*UnimplementedWriteServiceServer) Write(srv WriteService_WriteServer) error {
+	return status.Errorf(codes.Unimplemented, "method Write not implemented")
+}
+func (*UnimplementedWriteServiceServer) Reset(ctx context.Context, req *ResetSeqRequest) (*ResetSeqResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Reset not implemented")
+}
+func (*UnimplementedWriteServiceServer) Next(ctx context.Context, req *NextSeqRequest) (*NextSeqResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Next not implemented")
 }
 
 func RegisterWriteServiceServer(s *grpc.Server, srv WriteServiceServer) {
 	s.RegisterService(&_WriteService_serviceDesc, srv)
 }
 
-func _WriteService_WritePoints_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(common.Request)
+func _WriteService_Write_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(WriteServiceServer).Write(&writeServiceWriteServer{stream})
+}
+
+type WriteService_WriteServer interface {
+	Send(*WriteResponse) error
+	Recv() (*WriteRequest, error)
+	grpc.ServerStream
+}
+
+type writeServiceWriteServer struct {
+	grpc.ServerStream
+}
+
+func (x *writeServiceWriteServer) Send(m *WriteResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
+func (x *writeServiceWriteServer) Recv() (*WriteRequest, error) {
+	m := new(WriteRequest)
+	if err := x.ServerStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func _WriteService_Reset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetSeqRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(WriteServiceServer).WritePoints(ctx, in)
+		return srv.(WriteServiceServer).Reset(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/storage.WriteService/WritePoints",
+		FullMethod: "/storage.WriteService/Reset",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(WriteServiceServer).WritePoints(ctx, req.(*common.Request))
+		return srv.(WriteServiceServer).Reset(ctx, req.(*ResetSeqRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _WriteService_Next_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(NextSeqRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WriteServiceServer).Next(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/storage.WriteService/Next",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WriteServiceServer).Next(ctx, req.(*NextSeqRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -101,10 +668,1199 @@ var _WriteService_serviceDesc = grpc.ServiceDesc{
 	HandlerType: (*WriteServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "WritePoints",
-			Handler:    _WriteService_WritePoints_Handler,
+			MethodName: "Reset",
+			Handler:    _WriteService_Reset_Handler,
+		},
+		{
+			MethodName: "Next",
+			Handler:    _WriteService_Next_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "Write",
+			Handler:       _WriteService_Write_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "storage.proto",
 }
+
+func (m *Replica) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *Replica) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *Replica) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.Data) > 0 {
+		i -= len(m.Data)
+		copy(dAtA[i:], m.Data)
+		i = encodeVarintStorage(dAtA, i, uint64(len(m.Data)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if m.Seq != 0 {
+		i = encodeVarintStorage(dAtA, i, uint64(m.Seq))
+		i--
+		dAtA[i] = 0x8
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *WriteRequest) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *WriteRequest) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *WriteRequest) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.Replicas) > 0 {
+		for iNdEx := len(m.Replicas) - 1; iNdEx >= 0; iNdEx-- {
+			{
+				size, err := m.Replicas[iNdEx].MarshalToSizedBuffer(dAtA[:i])
+				if err != nil {
+					return 0, err
+				}
+				i -= size
+				i = encodeVarintStorage(dAtA, i, uint64(size))
+			}
+			i--
+			dAtA[i] = 0xa
+		}
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *WriteResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *WriteResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *WriteResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if m.Ack != nil {
+		{
+			size := m.Ack.Size()
+			i -= size
+			if _, err := m.Ack.MarshalTo(dAtA[i:]); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if m.CurSeq != 0 {
+		i = encodeVarintStorage(dAtA, i, uint64(m.CurSeq))
+		i--
+		dAtA[i] = 0x8
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *WriteResponse_AckSeq) MarshalTo(dAtA []byte) (int, error) {
+	return m.MarshalToSizedBuffer(dAtA[:m.Size()])
+}
+
+func (m *WriteResponse_AckSeq) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	i = encodeVarintStorage(dAtA, i, uint64(m.AckSeq))
+	i--
+	dAtA[i] = 0x10
+	return len(dAtA) - i, nil
+}
+func (m *ResetSeqRequest) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ResetSeqRequest) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *ResetSeqRequest) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if m.Seq != 0 {
+		i = encodeVarintStorage(dAtA, i, uint64(m.Seq))
+		i--
+		dAtA[i] = 0x18
+	}
+	if m.ShardID != 0 {
+		i = encodeVarintStorage(dAtA, i, uint64(m.ShardID))
+		i--
+		dAtA[i] = 0x10
+	}
+	if len(m.Database) > 0 {
+		i -= len(m.Database)
+		copy(dAtA[i:], m.Database)
+		i = encodeVarintStorage(dAtA, i, uint64(len(m.Database)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *ResetSeqResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ResetSeqResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *ResetSeqResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *NextSeqRequest) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *NextSeqRequest) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *NextSeqRequest) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if m.ShardID != 0 {
+		i = encodeVarintStorage(dAtA, i, uint64(m.ShardID))
+		i--
+		dAtA[i] = 0x10
+	}
+	if len(m.Database) > 0 {
+		i -= len(m.Database)
+		copy(dAtA[i:], m.Database)
+		i = encodeVarintStorage(dAtA, i, uint64(len(m.Database)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *NextSeqResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *NextSeqResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *NextSeqResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if m.Seq != 0 {
+		i = encodeVarintStorage(dAtA, i, uint64(m.Seq))
+		i--
+		dAtA[i] = 0x8
+	}
+	return len(dAtA) - i, nil
+}
+
+func encodeVarintStorage(dAtA []byte, offset int, v uint64) int {
+	offset -= sovStorage(v)
+	base := offset
+	for v >= 1<<7 {
+		dAtA[offset] = uint8(v&0x7f | 0x80)
+		v >>= 7
+		offset++
+	}
+	dAtA[offset] = uint8(v)
+	return base
+}
+func (m *Replica) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if m.Seq != 0 {
+		n += 1 + sovStorage(uint64(m.Seq))
+	}
+	l = len(m.Data)
+	if l > 0 {
+		n += 1 + l + sovStorage(uint64(l))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *WriteRequest) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if len(m.Replicas) > 0 {
+		for _, e := range m.Replicas {
+			l = e.Size()
+			n += 1 + l + sovStorage(uint64(l))
+		}
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *WriteResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if m.CurSeq != 0 {
+		n += 1 + sovStorage(uint64(m.CurSeq))
+	}
+	if m.Ack != nil {
+		n += m.Ack.Size()
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *WriteResponse_AckSeq) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	n += 1 + sovStorage(uint64(m.AckSeq))
+	return n
+}
+func (m *ResetSeqRequest) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Database)
+	if l > 0 {
+		n += 1 + l + sovStorage(uint64(l))
+	}
+	if m.ShardID != 0 {
+		n += 1 + sovStorage(uint64(m.ShardID))
+	}
+	if m.Seq != 0 {
+		n += 1 + sovStorage(uint64(m.Seq))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *ResetSeqResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *NextSeqRequest) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Database)
+	if l > 0 {
+		n += 1 + l + sovStorage(uint64(l))
+	}
+	if m.ShardID != 0 {
+		n += 1 + sovStorage(uint64(m.ShardID))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *NextSeqResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if m.Seq != 0 {
+		n += 1 + sovStorage(uint64(m.Seq))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func sovStorage(x uint64) (n int) {
+	return (math_bits.Len64(x|1) + 6) / 7
+}
+func sozStorage(x uint64) (n int) {
+	return sovStorage(uint64((x << 1) ^ uint64((int64(x) >> 63))))
+}
+func (m *Replica) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowStorage
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: Replica: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: Replica: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Seq", wireType)
+			}
+			m.Seq = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Seq |= int64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Data", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthStorage
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Data = append(m.Data[:0], dAtA[iNdEx:postIndex]...)
+			if m.Data == nil {
+				m.Data = []byte{}
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipStorage(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *WriteRequest) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowStorage
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: WriteRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: WriteRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Replicas", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthStorage
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Replicas = append(m.Replicas, &Replica{})
+			if err := m.Replicas[len(m.Replicas)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipStorage(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *WriteResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowStorage
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: WriteResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: WriteResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CurSeq", wireType)
+			}
+			m.CurSeq = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.CurSeq |= int64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AckSeq", wireType)
+			}
+			var v int64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.Ack = &WriteResponse_AckSeq{v}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipStorage(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ResetSeqRequest) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowStorage
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ResetSeqRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ResetSeqRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Database", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthStorage
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Database = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ShardID", wireType)
+			}
+			m.ShardID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.ShardID |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Seq", wireType)
+			}
+			m.Seq = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Seq |= int64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipStorage(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ResetSeqResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowStorage
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ResetSeqResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ResetSeqResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		default:
+			iNdEx = preIndex
+			skippy, err := skipStorage(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *NextSeqRequest) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowStorage
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: NextSeqRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: NextSeqRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Database", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthStorage
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Database = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ShardID", wireType)
+			}
+			m.ShardID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.ShardID |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipStorage(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *NextSeqResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowStorage
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: NextSeqResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: NextSeqResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Seq", wireType)
+			}
+			m.Seq = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Seq |= int64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipStorage(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if skippy < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) < 0 {
+				return ErrInvalidLengthStorage
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func skipStorage(dAtA []byte) (n int, err error) {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return 0, ErrIntOverflowStorage
+			}
+			if iNdEx >= l {
+				return 0, io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		wireType := int(wire & 0x7)
+		switch wireType {
+		case 0:
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return 0, ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return 0, io.ErrUnexpectedEOF
+				}
+				iNdEx++
+				if dAtA[iNdEx-1] < 0x80 {
+					break
+				}
+			}
+			return iNdEx, nil
+		case 1:
+			iNdEx += 8
+			return iNdEx, nil
+		case 2:
+			var length int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return 0, ErrIntOverflowStorage
+				}
+				if iNdEx >= l {
+					return 0, io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				length |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if length < 0 {
+				return 0, ErrInvalidLengthStorage
+			}
+			iNdEx += length
+			if iNdEx < 0 {
+				return 0, ErrInvalidLengthStorage
+			}
+			return iNdEx, nil
+		case 3:
+			for {
+				var innerWire uint64
+				var start int = iNdEx
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return 0, ErrIntOverflowStorage
+					}
+					if iNdEx >= l {
+						return 0, io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					innerWire |= (uint64(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				innerWireType := int(innerWire & 0x7)
+				if innerWireType == 4 {
+					break
+				}
+				next, err := skipStorage(dAtA[start:])
+				if err != nil {
+					return 0, err
+				}
+				iNdEx = start + next
+				if iNdEx < 0 {
+					return 0, ErrInvalidLengthStorage
+				}
+			}
+			return iNdEx, nil
+		case 4:
+			return iNdEx, nil
+		case 5:
+			iNdEx += 4
+			return iNdEx, nil
+		default:
+			return 0, fmt.Errorf("proto: illegal wireType %d", wireType)
+		}
+	}
+	panic("unreachable")
+}
+
+var (
+	ErrInvalidLengthStorage = fmt.Errorf("proto: negative length found during unmarshaling")
+	ErrIntOverflowStorage   = fmt.Errorf("proto: integer overflow")
+)

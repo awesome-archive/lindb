@@ -1,62 +1,66 @@
 package admin
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
-	"gopkg.in/check.v1"
+	"github.com/golang/mock/gomock"
 
-	"github.com/eleme/lindb/mock"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/state"
-	"github.com/eleme/lindb/service"
+	"github.com/lindb/lindb/mock"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/pkg/option"
+	"github.com/lindb/lindb/service"
 )
 
-type testDatabaseAPISuite struct {
-	mock.RepoTestSuite
-}
-
 func TestDatabaseAPI(t *testing.T) {
-	check.Suite(&testDatabaseAPISuite{})
-	test = t
-	check.TestingT(t)
-}
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-func (ts *testDatabaseAPISuite) TestGetDatabase(c *check.C) {
-	repo, _ := state.NewRepo(state.Config{
-		Endpoints: ts.Cluster.Endpoints,
-	})
+	databaseService := service.NewMockDatabaseService(ctrl)
 
-	api := NewDatabaseAPI(service.NewDatabaseService(repo))
+	api := NewDatabaseAPI(databaseService)
 
 	db := models.Database{
-		Name: "test",
-		Clusters: []models.DatabaseCluster{
-			{
-				Name:          "test",
-				NumOfShard:    12,
-				ReplicaFactor: 3,
-			},
-		},
+		Name:          "test",
+		Cluster:       "test",
+		NumOfShard:    12,
+		ReplicaFactor: 3,
+		Option:        option.DatabaseOption{Interval: "10s"},
 	}
-	//create success
-	mock.DoRequest(test, &mock.HTTPHandler{
+
+	// get request error
+	mock.DoRequest(t, &mock.HTTPHandler{
+		Method:         http.MethodPost,
+		URL:            "/database",
+		RequestBody:    []byte{1, 3, 4},
+		HandlerFunc:    api.Save,
+		ExpectHTTPCode: http.StatusInternalServerError,
+	})
+
+	// create success
+	databaseService.EXPECT().Save(gomock.Any()).Return(nil)
+	mock.DoRequest(t, &mock.HTTPHandler{
 		Method:         http.MethodPost,
 		URL:            "/database",
 		RequestBody:    db,
 		HandlerFunc:    api.Save,
 		ExpectHTTPCode: 204,
 	})
-	mock.DoRequest(test, &mock.HTTPHandler{
+	// create err
+	databaseService.EXPECT().Save(gomock.Any()).Return(fmt.Errorf("err"))
+	db.Name = ""
+	mock.DoRequest(t, &mock.HTTPHandler{
 		Method:         http.MethodPost,
 		URL:            "/database",
-		RequestBody:    models.Database{},
+		RequestBody:    db,
 		HandlerFunc:    api.Save,
 		ExpectHTTPCode: 500,
 	})
 
 	// get success
-	mock.DoRequest(test, &mock.HTTPHandler{
+	databaseService.EXPECT().Get(gomock.Any()).Return(&db, nil)
+	mock.DoRequest(t, &mock.HTTPHandler{
 		Method:         http.MethodGet,
 		URL:            "/database?name=test",
 		HandlerFunc:    api.GetByName,
@@ -64,17 +68,34 @@ func (ts *testDatabaseAPISuite) TestGetDatabase(c *check.C) {
 		ExpectResponse: db,
 	})
 	// no database name
-	mock.DoRequest(test, &mock.HTTPHandler{
+	mock.DoRequest(t, &mock.HTTPHandler{
 		Method:         http.MethodGet,
 		URL:            "/database",
 		HandlerFunc:    api.GetByName,
 		ExpectHTTPCode: 500,
 	})
-	// wrong database name
-	mock.DoRequest(test, &mock.HTTPHandler{
+	databaseService.EXPECT().Get(gomock.Any()).Return(nil, fmt.Errorf("err"))
+	mock.DoRequest(t, &mock.HTTPHandler{
 		Method:         http.MethodGet,
-		URL:            "/database?name=test2",
+		URL:            "/database?name=test",
 		HandlerFunc:    api.GetByName,
+		ExpectHTTPCode: 404,
+	})
+
+	databaseService.EXPECT().List().Return(nil, fmt.Errorf("err"))
+	mock.DoRequest(t, &mock.HTTPHandler{
+		Method:         http.MethodGet,
+		URL:            "/database/list",
+		HandlerFunc:    api.List,
 		ExpectHTTPCode: 500,
+	})
+
+	databaseService.EXPECT().List().Return([]*models.Database{&db}, nil)
+	mock.DoRequest(t, &mock.HTTPHandler{
+		Method:         http.MethodGet,
+		URL:            "/database/list",
+		HandlerFunc:    api.List,
+		ExpectHTTPCode: 200,
+		ExpectResponse: []*models.Database{&db},
 	})
 }

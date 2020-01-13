@@ -1,14 +1,22 @@
-![lindb_logo.png](https://github.com/eleme/lindb/wiki/images/readme/lindb_logo.png)
+<p align="left">
+    <img width="400" src="https://github.com/lindb/lindb/wiki/images/readme/lindb_logo.png">
+</p>
 
-![Travis CI Build Status](https://api.travis-ci.org/google/btree.svg?branch=master)
-[![codecov](https://codecov.io/gh/stone1100/lindb/branch/develop/graph/badge.svg)](https://codecov.io/gh/stone1100/lindb)
+[![LICENSE](https://img.shields.io/github/license/lindb/lindb)](https://github.com/lindb/lindb/blob/develop/LICENSE)
+[![Language](https://img.shields.io/badge/Language-Go-blue.svg)](https://golang.org/)
+[![Go Report Card](https://goreportcard.com/badge/github.com/lindb/lindb)](https://goreportcard.com/report/github.com/lindb/lindb)
+[![Github Actions Status](https://github.com/lindb/lindb/workflows/LinDB%20CI/badge.svg)](https://github.com/lindb/lindb/actions?query=workflow%3A%22LinDB+CI%22)
+[![Github Actions Status](https://github.com/lindb/lindb/workflows/Forntend%20CI/badge.svg)](https://github.com/lindb/lindb/actions?query=workflow%3A%22Forntend+CI%22)
+[![codecov](https://codecov.io/gh/lindb/lindb/branch/develop/graph/badge.svg)](https://codecov.io/gh/lindb/lindb)
 [![contribution](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat)](CONTRIBUTING.md)
+
+English | [简体中文](./README-zh_CN.md)
 
 ## What is LinDB?
 
-LinDB("Lin" stands for wisdom in Shanghainese) is a open-source Time Series Database which provides high performance, high availability and horizontal scalability. 
+LinDB is an open-source Time Series Database which provides high performance, high availability and horizontal scalability. 
 
-LinDB stores all monitoring data of ELEME Inc, there is 88TB incremental writes per day and 2.7PB total  raw data. 
+LinDB stores all monitoring data of ELEME Inc, there is 88TB incremental writes per day and 2.7PB total raw data.
 
 + __High performance__
 
@@ -31,7 +39,7 @@ LinDB stores all monitoring data of ELEME Inc, there is 88TB incremental writes 
 
 + __Horizontal scalability__
 
-  Tags based sharding strategy in LinDB solves the hotspots problem, and is truly horizontally expanded available by simply adding new broker and storage nodes.
+  Series(Tags) based sharding strategy in LinDB solves the hotspots problem, and is truly horizontally expanded available by simply adding new broker and storage nodes.
   
 + __Governance capability of metrics__
 
@@ -40,7 +48,8 @@ LinDB stores all monitoring data of ELEME Inc, there is 88TB incremental writes 
 ## State of this project
 
 The current develop branch is unstable and is not recommended for production use. LinDB 0.1(what will be the first release version) is currently in the development stage. 
-Additional features will arrive during July, we will translate the JAVA version of LinDB currently used under the production environment to Golang as soon as possible.
+Additional features will arrive during July and August, we will translate the JAVA version of LinDB currently used under the production environment to Golang as soon as possible.
+The GO version is not only a simple translation of the JAVA version, but has been redesigned in many aspects.
 
 Once we implement the final feature and replace the LinDB under production environment with the Golang version, LinDB 0.1.0 will be released. At that point, we will move into the stable phase, our intention is to avoid breaking changes to the API and storage file format.
 
@@ -48,21 +57,15 @@ Once we implement the final feature and replace the LinDB under production envir
 
 ## Architecture
 
-![architecture](https://github.com/eleme/lindb/wiki/images/readme/lindb_architecture.jpg)
-
-## Screenshots
-![home](https://github.com/eleme/lindb/wiki/images/readme/home.png)
-![search](https://github.com/eleme/lindb/wiki/images/readme/search.png)
-![explain](https://github.com/eleme/lindb/wiki/images/readme/explain.png)
-![database](https://github.com/eleme/lindb/wiki/images/readme/database.png)
+![architecture](https://github.com/lindb/lindb/wiki/images/readme/lindb_architecture.jpg)
 
 ## Contributing
 
 Contributions are welcomed and greatly appreciated. See [CONTRIBUTING](CONTRIBUTING.md) for details on submitting patches and the contribution workflow.
 
 #### CI 
-Pull requests should be appropriately labeled, and linked to any relevant [bug or feature tracking issues](https://github.com/eleme/lindb/issues). 
-All pull requests will run through Travis-CI. Community contributors should be able to see the outcome of this process by looking at the checks on their PR and fix the build errors.
+Pull requests should be appropriately labeled, and linked to any relevant [bug or feature tracking issues](https://github.com/lindb/lindb/issues). 
+All pull requests will run through GITHUB-Actions. Community contributors should be able to see the outcome of this process by looking at the checks on their PR and fix the build errors.
 
 #### Static Analysis 
 This project uses the following linters. Failure during the running of any of these tools results in a failed build. Generally, code must be adjusted to satisfy these tools.

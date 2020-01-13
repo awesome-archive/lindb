@@ -1,49 +1,68 @@
 package service
 
 import (
+	"encoding/json"
+	"fmt"
 	"testing"
 
-	"gopkg.in/check.v1"
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 
-	"github.com/eleme/lindb/mock"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/state"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/pkg/state"
 )
 
-type testShardAssignSRVSuite struct {
-	mock.RepoTestSuite
-}
+func TestShardAssignService(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-func TestShardAssignSRV(t *testing.T) {
-	check.Suite(&testShardAssignSRVSuite{})
-	check.TestingT(t)
-}
-
-func (ts *testShardAssignSRVSuite) TestShardAssign(c *check.C) {
-	repo, _ := state.NewRepo(state.Config{
-		Endpoints: ts.Cluster.Endpoints,
-	})
+	repo := state.NewMockRepository(ctrl)
 
 	srv := NewShardAssignService(repo)
 
-	shardAssign1 := models.NewShardAssignment()
+	shardAssign1 := models.NewShardAssignment("test")
 	shardAssign1.AddReplica(1, 1)
 	shardAssign1.AddReplica(1, 2)
 	shardAssign1.AddReplica(1, 3)
 	shardAssign1.AddReplica(2, 2)
+	repo.EXPECT().Put(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 	_ = srv.Save("db1", shardAssign1)
 
-	shardAssign2 := models.NewShardAssignment()
+	shardAssign2 := models.NewShardAssignment("test")
 	shardAssign2.AddReplica(1, 1)
 	shardAssign2.AddReplica(2, 2)
+	repo.EXPECT().Put(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 	_ = srv.Save("db2", shardAssign2)
 
+	data1, _ := json.Marshal(shardAssign1)
+	repo.EXPECT().Get(gomock.Any(), gomock.Any()).Return(data1, nil)
 	shardAssign11, _ := srv.Get("db1")
-	c.Assert(*shardAssign1, check.DeepEquals, *shardAssign11)
+	assert.Equal(t, *shardAssign1, *shardAssign11)
 
+	data2, _ := json.Marshal(shardAssign2)
+	repo.EXPECT().Get(gomock.Any(), gomock.Any()).Return(data2, nil)
 	shardAssign22, _ := srv.Get("db2")
-	c.Assert(*shardAssign2, check.DeepEquals, *shardAssign22)
+	assert.Equal(t, *shardAssign2, *shardAssign22)
 
+	repo.EXPECT().Get(gomock.Any(), gomock.Any()).Return(nil, state.ErrNotExist)
 	_, err := srv.Get("not_exist")
-	c.Assert(state.ErrNotExist, check.Equals, err)
+	assert.Equal(t, state.ErrNotExist, err)
+
+	// unmarshal error
+	repo.EXPECT().Get(gomock.Any(), gomock.Any()).Return([]byte{1, 3, 34}, nil)
+	_, err = srv.Get("not_exist")
+	assert.NotNil(t, err)
+
+	repo.EXPECT().List(gomock.Any(), gomock.Any()).Return([]state.KeyValue{
+		{Key: "data2", Value: data2},
+		{Key: "err", Value: []byte{1, 1, 1}},
+	}, nil)
+	list, _ := srv.List()
+	assert.Equal(t, 1, len(list))
+	assert.Equal(t, *shardAssign2, *(list[0]))
+
+	repo.EXPECT().List(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("err"))
+	list, err = srv.List()
+	assert.Nil(t, list)
+	assert.NotNil(t, err)
 }

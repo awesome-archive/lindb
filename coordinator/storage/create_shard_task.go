@@ -2,14 +2,14 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
-	"github.com/eleme/lindb/constants"
-	"github.com/eleme/lindb/coordinator/task"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/logger"
-	"github.com/eleme/lindb/service"
+	"github.com/lindb/lindb/constants"
+	"github.com/lindb/lindb/coordinator/task"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/pkg/encoding"
+	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/service"
 )
 
 // createShardProcessor represents create shard when receive task.
@@ -33,12 +33,16 @@ func (p *createShardProcessor) Concurrency() int            { return 1 }
 // Process creates shard for storing time series data
 func (p *createShardProcessor) Process(ctx context.Context, task task.Task) error {
 	param := models.CreateShardTask{}
-	if err := json.Unmarshal(task.Params, &param); err != nil {
+	if err := encoding.JSONUnmarshal(task.Params, &param); err != nil {
 		return err
 	}
-	logger.GetLogger("create_shard/task").
+	logger.GetLogger("coordinator", "StorageCreateShardProcessor").
 		Info("process create shard task", logger.String("params", string(task.Params)))
-	if err := p.storageService.CreateShards(param.Database, param.ShardOption, param.ShardIDs...); err != nil {
+	if err := p.storageService.CreateShards(
+		param.DatabaseName,
+		param.DatabaseOption,
+		param.ShardIDs...,
+	); err != nil {
 		return err
 	}
 	return nil

@@ -5,12 +5,15 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/RoaringBitmap/roaring"
+	"github.com/lindb/roaring"
 
-	"github.com/eleme/lindb/pkg/bufioutil"
-	"github.com/eleme/lindb/pkg/encoding"
-	"github.com/eleme/lindb/pkg/mmap"
+	"github.com/lindb/lindb/pkg/encoding"
+	"github.com/lindb/lindb/pkg/fileutil"
+	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/stream"
 )
+
+//go:generate mockgen -source ./reader.go -destination=./reader_mock.go -package table
 
 const (
 	sstFileFooterSize = 1 + // entry length wrote by bufioutil
@@ -22,8 +25,12 @@ const (
 	sstFileMinLength = sstFileFooterSize + 2
 )
 
+var log = logger.GetLogger("kv", "reader")
+
 // Reader reads k/v pair from store file
 type Reader interface {
+	// Path returns the file path
+	Path() string
 	// Get returns value for giving key
 	Get(key uint32) []byte
 	// Iterator iterates over a store's key/value pairs in key order.
@@ -43,7 +50,15 @@ type storeMMapReader struct {
 
 // newMMapStoreReader creates mmap store file reader
 func newMMapStoreReader(path string) (Reader, error) {
-	data, err := mmap.Map(path)
+	data, err := fileutil.Map(path)
+	defer func() {
+		if err != nil {
+			if e := fileutil.Unmap(data); e != nil {
+				log.Warn("unmap error when new store reader fail",
+					logger.String("path", path), logger.Error(err))
+			}
+		}
+	}()
 	if err != nil {
 		return nil, fmt.Errorf("create mmap store reader error:%s", err)
 	}
@@ -71,16 +86,16 @@ func (r *storeMMapReader) initialize() error {
 		return fmt.Errorf("read sstfile:%s footer error", r.path)
 	}
 	// validate magic-number
-	if binary.BigEndian.Uint64(buf[9:]) != magicNumberOffsetFile {
+	if binary.LittleEndian.Uint64(buf[9:]) != magicNumberOffsetFile {
 		return fmt.Errorf("verify magic-number of sstfile:%s failure", r.path)
 	}
-	posOfOffset := int(binary.BigEndian.Uint32(buf[:4]))
-	posOfKeys := int(binary.BigEndian.Uint32(buf[4:8]))
+	posOfOffset := int(binary.LittleEndian.Uint32(buf[:4]))
+	posOfKeys := int(binary.LittleEndian.Uint32(buf[4:8]))
 	if err := r.keys.UnmarshalBinary(r.readBytes(posOfKeys)); err != nil {
 		return fmt.Errorf("unmarshal keys data from file[%s] error:%s", r.path, err)
 	}
 	offset := r.readBytes(posOfOffset)
-	d := encoding.NewDeltaBitPackingDecoder(&offset)
+	d := encoding.NewDeltaBitPackingDecoder(offset)
 
 	for d.HasNext() {
 		r.offsets = append(r.offsets, d.Next())
@@ -90,6 +105,11 @@ func (r *storeMMapReader) initialize() error {
 		return fmt.Errorf("num. of keys != num. of offsets in file[%s]", r.path)
 	}
 	return nil
+}
+
+// Path returns the file path
+func (r *storeMMapReader) Path() string {
+	return r.path
 }
 
 // Get return value for key, if not exist return nil
@@ -110,7 +130,7 @@ func (r *storeMMapReader) Iterator() Iterator {
 
 // close store reader, release resource
 func (r *storeMMapReader) Close() error {
-	return mmap.Unmap(r.data)
+	return fileutil.Unmap(r.data)
 }
 
 // readBytes reads bytes from buffer, read length+data format
@@ -119,7 +139,7 @@ func (r *storeMMapReader) readBytes(offset int) []byte {
 	if err != nil {
 		return nil
 	}
-	bytesCount := int(bufioutil.GetVariantLength(length))
+	bytesCount := stream.UvariantSize(length)
 	start := offset + bytesCount
 	end := start + int(length)
 	if end > len(r.data) {
@@ -144,9 +164,9 @@ func newMMapIterator(reader *storeMMapReader) Iterator {
 	}
 }
 
-// Next moves the iterator to the next key/value pair.
+// HasNext returns if the iteration has more element.
 // It returns false if the iterator is exhausted.
-func (it *storeMMapIterator) Next() bool {
+func (it *storeMMapIterator) HasNext() bool {
 	return it.keyIt.HasNext()
 }
 

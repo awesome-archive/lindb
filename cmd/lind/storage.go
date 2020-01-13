@@ -2,31 +2,36 @@ package lind
 
 import (
 	"fmt"
-	_ "net/http/pprof" // for profiling
 
-	"github.com/eleme/lindb/config"
-	"github.com/eleme/lindb/pkg/util"
-	"github.com/eleme/lindb/storage"
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/ltoml"
+	"github.com/lindb/lindb/storage"
 
 	"github.com/spf13/cobra"
 )
 
-var (
-	storageCfgPath = ""
-	storageDebug   = false
+const (
+	storageCfgName        = "storage.toml"
+	defaultStorageCfgFile = "./" + storageCfgName
 )
+
+var runStorageCmd = &cobra.Command{
+	Use:   "run",
+	Short: "starts the storage",
+	RunE:  serveStorage,
+}
 
 // newStorageCmd returns a new storage-cmd
 func newStorageCmd() *cobra.Command {
 	storageCmd := &cobra.Command{
-		Use:     "storage",
-		Aliases: []string{"sto", "stor"},
-		Short:   "The storage layer of LinDB",
+		Use:   "storage",
+		Short: "Run as a storage node with cluster mode enabled",
 	}
-	runStorageCmd.PersistentFlags().StringVar(&storageCfgPath, "config", "",
-		fmt.Sprintf("storage config file path, default is %s", storage.DefaultStorageCfgFile))
-	runStorageCmd.PersistentFlags().BoolVar(&storageDebug, "debug", false,
+	runStorageCmd.PersistentFlags().BoolVar(&debug, "debug", false,
 		"profiling Go programs with pprof")
+	runStorageCmd.PersistentFlags().StringVar(&cfg, "config", "",
+		fmt.Sprintf("storage config file path, default is %s", defaultStorageCfgFile))
 
 	storageCmd.AddCommand(
 		runStorageCmd,
@@ -36,40 +41,36 @@ func newStorageCmd() *cobra.Command {
 	return storageCmd
 }
 
-var runStorageCmd = &cobra.Command{
-	Use:   "run",
-	Short: "starts the storage",
-	RunE:  serveStorage,
-}
-
 var initializeStorageConfigCmd = &cobra.Command{
-	Use:   "initialize-config",
-	Short: "initialize a new storage-config by steps",
+	Use:   "init-config",
+	Short: "create a new default storage-config",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := storageCfgPath
+		path := cfg
 		if len(path) == 0 {
-			path = storage.DefaultStorageCfgFile
+			path = defaultStorageCfgFile
 		}
-		defaultCfg := config.NewDefaultStorageCfg()
-		return util.EncodeToml(path, &defaultCfg)
+		if err := checkExistenceOf(path); err != nil {
+			return err
+		}
+		return ltoml.WriteConfig(path, config.NewDefaultStorageTOML())
 	},
 }
 
 func serveStorage(cmd *cobra.Command, args []string) error {
 	ctx := newCtxWithSignals()
 
-	// start storage server
-	storageRuntime := storage.NewStorageRuntime(storageCfgPath)
-	if err := storageRuntime.Run(); err != nil {
-		return fmt.Errorf("run storage server error:%s", err)
+	storageCfg := config.Storage{}
+	if err := ltoml.LoadConfig(cfg, defaultStorageCfgFile, &storageCfg); err != nil {
+		return fmt.Errorf("decode config file error: %s", err)
+	}
+	if err := logger.InitLogger(storageCfg.Logging); err != nil {
+		return fmt.Errorf("init logger error: %s", err)
 	}
 
-	// waiting system exit signal
-	<-ctx.Done()
-
-	// stop storage server
-	if err := storageRuntime.Stop(); err != nil {
-		return fmt.Errorf("stop storage server error:%s", err)
+	// start storage server
+	storageRuntime := storage.NewStorageRuntime(getVersion(), storageCfg)
+	if err := run(ctx, storageRuntime); err != nil {
+		return err
 	}
 	return nil
 }

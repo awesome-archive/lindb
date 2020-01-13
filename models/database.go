@@ -1,19 +1,27 @@
 package models
 
-import "github.com/eleme/lindb/pkg/option"
+import (
+	"fmt"
+
+	"github.com/lindb/lindb/pkg/option"
+)
 
 // Database defines database config, database can include multi-cluster
 type Database struct {
-	Name     string            `json:"name"`
-	Clusters []DatabaseCluster `json:"clusters"`
+	Name          string                `json:"name"`          // database's name
+	Cluster       string                `json:"cluster"`       // storage cluster's name
+	NumOfShard    int                   `json:"numOfShard"`    // num. of shard
+	ReplicaFactor int                   `json:"replicaFactor"` // replica refactor
+	Option        option.DatabaseOption `json:"option"`        // time series database option
+	Desc          string                `json:"desc,omitempty"`
 }
 
-// DatabaseCluster represents database's storage cluster config
-type DatabaseCluster struct {
-	Name          string             `json:"name"`
-	NumOfShard    int                `json:"numOfShard"`
-	ReplicaFactor int                `json:"replicaFactor"`
-	ShardOption   option.ShardOption `json:"shardOption"`
+// String returns the database's description
+func (db Database) String() string {
+	result := "create database " + db.Name + " with "
+	result += "shard " + fmt.Sprintf("%d", db.NumOfShard) + ", replica " + fmt.Sprintf("%d", db.ReplicaFactor)
+	result += ", interval " + db.Option.Interval
+	return result
 }
 
 // Replica defines replica list for spec shard of database
@@ -23,22 +31,26 @@ type Replica struct {
 
 // ShardAssignment defines shard assignment for database
 type ShardAssignment struct {
-	Config DatabaseCluster `json:"cluster"`
-	Nodes  map[int]Node    `json:"nodes"`
-	Shards map[int]Replica `json:"shards"`
+	Name   string           `json:"name"` // database's name
+	Nodes  map[int]*Node    `json:"nodes"`
+	Shards map[int]*Replica `json:"shards"`
 }
 
 // NewShardAssignment returns empty shard assignment instance
-func NewShardAssignment() *ShardAssignment {
+func NewShardAssignment(name string) *ShardAssignment {
 	return &ShardAssignment{
-		Nodes:  make(map[int]Node),
-		Shards: make(map[int]Replica),
+		Name:   name,
+		Nodes:  make(map[int]*Node),
+		Shards: make(map[int]*Replica),
 	}
 }
 
 // AddReplica adds replica id to replica list of spec shard
 func (s *ShardAssignment) AddReplica(shardID int, replicaID int) {
-	replica := s.Shards[shardID]
+	replica, ok := s.Shards[shardID]
+	if !ok {
+		replica = &Replica{}
+		s.Shards[shardID] = replica
+	}
 	replica.Replicas = append(replica.Replicas, replicaID)
-	s.Shards[shardID] = replica
 }

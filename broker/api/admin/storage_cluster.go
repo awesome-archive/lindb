@@ -3,9 +3,9 @@ package admin
 import (
 	"net/http"
 
-	"github.com/eleme/lindb/broker/api"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/service"
+	"github.com/lindb/lindb/broker/api"
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/service"
 )
 
 // StorageClusterAPI represents storage cluster admin rest api
@@ -22,8 +22,8 @@ func NewStorageClusterAPI(storageClusterService service.StorageClusterService) *
 
 // Create creates config of storage cluster
 func (s *StorageClusterAPI) Create(w http.ResponseWriter, r *http.Request) {
-	storage := models.StorageCluster{}
-	err := api.GetJSONBodyFromRequest(r, &storage)
+	storage := &config.StorageCluster{}
+	err := api.GetJSONBodyFromRequest(r, storage)
 	if err != nil {
 		api.Error(w, err)
 		return
@@ -45,7 +45,7 @@ func (s *StorageClusterAPI) GetByName(w http.ResponseWriter, r *http.Request) {
 	}
 	cluster, err := s.storageClusterService.Get(name)
 	if err != nil {
-		api.NotFound(w)
+		api.Error(w, err)
 		return
 	}
 	api.OK(w, cluster)

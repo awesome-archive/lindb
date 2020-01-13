@@ -8,8 +8,10 @@ import (
 	rice "github.com/GeertJohan/go.rice"
 	"github.com/gorilla/mux"
 
-	"github.com/eleme/lindb/pkg/util"
+	"github.com/lindb/lindb/pkg/logger"
 )
+
+var staticPath = "./../../web/build"
 
 type route struct {
 	name    string
@@ -27,11 +29,13 @@ var routes []route
 
 var middlewareHandlers []middlewareHandler
 
+// AddMiddleware adds middleware func base on url path pattern
 func AddMiddleware(middleware mux.MiddlewareFunc, regexp *regexp.Regexp) {
 	middlewareHandlers = append(middlewareHandlers, middlewareHandler{middleware: middleware, regexp: regexp})
 }
 
-func AddRoutes(name, method, pattern string, handler http.HandlerFunc) {
+// AddRoute adds http route handle func for urp pattern
+func AddRoute(name, method, pattern string, handler http.HandlerFunc) {
 	routes = append(routes, route{name: name, method: method, pattern: pattern, handler: handler})
 }
 
@@ -45,31 +49,51 @@ func NewRouter() *mux.Router {
 		// this route.pattern set middleware
 		if len(mds) > 0 {
 			for _, md := range mds {
-				if handler != nil {
-					handler = md.Middleware(handler)
-				} else {
-					handler = md.Middleware(route.handler)
-				}
+				handler = md.Middleware(route.handler)
 			}
 		} else {
 			handler = route.handler
 		}
 		router.
-			Methods(route.method).
+			Methods([]string{route.method, http.MethodOptions}...).
 			Name(route.name).
 			Handler(panicHandler(handler)).
 			Path(route.pattern)
 	}
 	// static server path exist, serve web console
-	webPath := "./web/build"
-	if util.Exist(webPath) {
-		router.PathPrefix("/static/").
-			Handler(http.StripPrefix("/static/",
-				http.FileServer(rice.MustFindBox("./../../web/build").HTTPBox())))
+	box, err := rice.FindBox(staticPath)
+	if err != nil {
+		log.Error("cannot find static resource", logger.Error(err))
+	} else {
+		router.Path("/").Handler(http.HandlerFunc(redirectToConsole))
+		router.PathPrefix("/console/").
+			Handler(http.StripPrefix("/console/",
+				http.FileServer(box.HTTPBox())))
 	}
-	//router.Use(mux.CORSMethodMiddleware(router))
-	router.HandleFunc("*", crossHandler)
+	// add cors support
+	router.Use(
+		func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Allow-Method", "POST, OPTIONS, GET, HEAD, PUT, PATCH, DELETE")
+
+				w.Header().Set("Access-Control-Allow-Headers",
+					"Origin, X-Requested-With, X-HTTP-Method-Override,accept-charset,accept-encoding "+
+						", Content-Type, Accept, Authorization")
+
+				if r.Method == http.MethodOptions {
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		})
 	return router
+}
+
+// redirectToConsole redirects to admin console
+func redirectToConsole(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, "/console/", http.StatusFound)
 }
 
 // getMiddleware returns suited middleware by pattern
@@ -81,20 +105,6 @@ func getMiddleware(pattern string) []mux.MiddlewareFunc {
 		}
 	}
 	return ms
-}
-
-// crossHandler builds crossing http request handler
-func crossHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
-	w.Header().Set("Access-Control-Allow-Credentials", "true")
-	w.Header().Add("Access-Control-Allow-Method", "POST, OPTIONS, GET, HEAD, PUT, PATCH, DELETE")
-
-	w.Header().Add("Access-Control-Allow-Headers",
-		"Origin, X-Requested-With, X-HTTP-Method-Override,accept-charset,accept-encoding , Content-Type, Accept, Cookie")
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method == http.MethodOptions {
-		return
-	}
 }
 
 // panicHandler handles panics and returns a json response with error message
@@ -114,6 +124,7 @@ func panicHandler(h http.Handler) http.Handler {
 					err = errors.New("UnKnow ERROR")
 				}
 				http.Error(w, err.Error(), http.StatusInternalServerError)
+				log.Error("serve http func panic", logger.Error(err), logger.Stack())
 			}
 		}()
 		h.ServeHTTP(w, r)

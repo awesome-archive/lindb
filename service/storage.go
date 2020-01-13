@@ -1,87 +1,100 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
-	"github.com/eleme/lindb/config"
-
-	"github.com/eleme/lindb/pkg/option"
-	"github.com/eleme/lindb/tsdb"
+	"github.com/lindb/lindb/pkg/option"
+	"github.com/lindb/lindb/tsdb"
 )
 
-// StorageService represents a storage manage interface for tsdb engine
-type StorageService interface {
-	// CreateShards creates shards for data partition
-	CreateShards(db string, option option.ShardOption, shardIDs ...int) error
-	// GetEngine returns engine by given db name, if not exist return nil
-	GetEngine(db string) tsdb.Engine
-	// GetShard returns shard by given db and shard id, if not exist return nil
-	GetShard(db string, shardID int) tsdb.Shard
-}
+//go:generate mockgen -source ./storage.go -destination=./storage_mock.go -package service
 
-// NewStorageService creates storage service instance for managing tsdb engine
-func NewStorageService(config config.Engine) StorageService {
-	return &storageService{
-		config: config,
-	}
+// StorageService represents a storage manage interface for time series engine
+type StorageService interface {
+	// CreateShards creates shards for data partition by given options
+	// 1) dump engine option into local disk
+	// 2) create shard storage struct
+	CreateShards(
+		databaseName string,
+		databaseOption option.DatabaseOption,
+		shardIDs ...int32,
+	) error
+
+	// GetDatabase returns database by given db-name
+	GetDatabase(databaseName string) (tsdb.Database, bool)
+
+	// GetShard returns shard by given db and shard id
+	GetShard(databaseName string, shardID int32) (tsdb.Shard, bool)
+
+	// FLush produces a signal to workers for flushing memory database by name
+	FlushDatabase(ctx context.Context, databaseName string) bool
+
+	// Close closes the time series engine
+	Close()
 }
 
 // storageService implements StorageService interface
 type storageService struct {
-	engines sync.Map
-
-	config config.Engine
+	engine tsdb.Engine
 	mutex  sync.Mutex
 }
 
-// CreateShards creates shards for data partition by given options
-// 1) dump engine option into local disk
-// 2) create shard storage struct
-func (s *storageService) CreateShards(db string, option option.ShardOption, shardIDs ...int) error {
-	if len(shardIDs) == 0 {
-		return fmt.Errorf("cannot create empty shard for db[%s]", db)
+// NewStorageService creates storage service instance for managing time series engine
+func NewStorageService(engine tsdb.Engine) StorageService {
+	return &storageService{
+		engine: engine,
 	}
-	engine := s.GetEngine(db)
-	if engine == nil {
+}
+
+func (s *storageService) CreateShards(
+	databaseName string,
+	databaseOption option.DatabaseOption,
+	shardIDs ...int32,
+) error {
+	if len(shardIDs) == 0 {
+		return fmt.Errorf("cannot create empty shard for database[%s]", databaseName)
+	}
+	db, ok := s.GetDatabase(databaseName)
+	if !ok {
 		s.mutex.Lock()
 		defer s.mutex.Unlock()
 		// double check
-		engine = s.GetEngine(db)
-		if engine == nil {
-			// create tsdb engine
+		db, ok = s.GetDatabase(databaseName)
+		if !ok {
+			// create a time series engine
 			var err error
-			engine, err = tsdb.NewEngine(db, s.config.Path)
+			db, err = s.engine.CreateDatabase(databaseName)
 			if err != nil {
 				return err
 			}
-			s.engines.Store(db, engine)
 		}
 	}
 
 	// create shards for database
-	if err := engine.CreateShards(option, shardIDs...); err != nil {
+	if err := db.CreateShards(databaseOption, shardIDs...); err != nil {
 		return err
 	}
-
 	return nil
 }
 
-// GetShard returns shard by given db and shard id, if not exist return nil
-func (s *storageService) GetShard(db string, shardID int) tsdb.Shard {
-	engine := s.GetEngine(db)
-	if engine == nil {
-		return nil
+func (s *storageService) GetShard(databaseName string, shardID int32) (tsdb.Shard, bool) {
+	db, ok := s.GetDatabase(databaseName)
+	if !ok {
+		return nil, false
 	}
-	return engine.GetShard(shardID)
+	return db.GetShard(shardID)
 }
 
-// GetEngine returns engine by given db name, if not exist return nil
-func (s *storageService) GetEngine(db string) tsdb.Engine {
-	engine, _ := s.engines.Load(db)
-	e, ok := engine.(tsdb.Engine)
-	if ok {
-		return e
-	}
-	return nil
+func (s *storageService) GetDatabase(databaseName string) (tsdb.Database, bool) {
+	return s.engine.GetDatabase(databaseName)
+}
+
+func (s *storageService) FlushDatabase(ctx context.Context, databaseName string) bool {
+	return s.engine.FlushDatabase(ctx, databaseName)
+}
+
+func (s *storageService) Close() {
+	s.engine.Close()
 }

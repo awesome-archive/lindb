@@ -5,9 +5,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/lindb/lindb/pkg/fileutil"
 
-	"github.com/eleme/lindb/pkg/util"
+	"github.com/stretchr/testify/assert"
 )
 
 const (
@@ -17,14 +17,16 @@ const (
 func Test_magicNumber(t *testing.T) {
 	code := []byte("eleme-ci")
 	assert.Len(t, code, 8)
-	assert.Equal(t, magicNumberOffsetFile, binary.BigEndian.Uint64(code))
+	assert.Equal(t, magicNumberOffsetFile, binary.LittleEndian.Uint64(code))
 }
 
 func Test_BuildStore(t *testing.T) {
-	_ = util.MkDirIfNotExist(testKVPath)
-	var builder, err = NewStoreBuilder(testKVPath, 10)
-	defer os.RemoveAll(testKVPath)
-	defer builder.Close()
+	_ = fileutil.MkDirIfNotExist(testKVPath)
+	var builder, err = NewStoreBuilder(10, testKVPath+"/000010.sst")
+	defer func() {
+		_ = os.RemoveAll(testKVPath)
+		_ = builder.Close()
+	}()
 
 	assert.Nil(t, err)
 
@@ -43,4 +45,20 @@ func Test_BuildStore(t *testing.T) {
 	assert.Equal(t, uint32(10), builder.MaxKey())
 	assert.Equal(t, int64(10), builder.FileNumber())
 	assert.True(t, builder.Size() > 0)
+}
+
+func TestStoreBuilder_Abandon(t *testing.T) {
+	_ = fileutil.MkDirIfNotExist(testKVPath)
+	defer func() {
+		_ = os.RemoveAll(testKVPath)
+	}()
+	var builder, err = NewStoreBuilder(10, testKVPath+"/000010.sst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = builder.Add(1, []byte("test"))
+	err = builder.Abandon()
+	if err != nil {
+		t.Fatal(err)
+	}
 }

@@ -5,7 +5,7 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/eleme/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/logger"
 )
 
 // FileLock is file lock
@@ -19,7 +19,7 @@ type FileLock struct {
 func NewFileLock(fileName string) *FileLock {
 	return &FileLock{
 		fileName: fileName,
-		logger:   logger.GetLogger(fmt.Sprintf("file/lock[%s]", fileName)),
+		logger:   logger.GetLogger("pkg/lockers", fmt.Sprintf("FileLock[%s]", fileName)),
 	}
 }
 

@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"reflect"
 
-	strm "github.com/eleme/lindb/pkg/stream"
+	"github.com/lindb/lindb/pkg/stream"
 )
+
+//go:generate mockgen -source=./log.go -destination=./log_mock.go -package=version
 
 func init() {
 	// register new file
@@ -54,8 +56,8 @@ type Log interface {
 // StoreLog metadata dit log store level
 type StoreLog interface {
 	Log
-	// applyVersionSet apply edito to store version set
-	applyVersionSet(versionSet *StoreVersionSet)
+	// applyVersionSet apply edit to store version set
+	applyVersionSet(versionSet StoreVersionSet)
 }
 
 // NewFile add new file into metadata
@@ -74,26 +76,25 @@ func CreateNewFile(level int32, file *FileMeta) *NewFile {
 
 // Encode writes new file data to binary, if error return err
 func (n *NewFile) Encode() ([]byte, error) {
-	var stream = strm.BinaryWriter()
+	writer := stream.NewBufferWriter(nil)
 
-	stream.PutInt32(n.level)                // level
-	stream.PutInt64(n.file.GetFileNumber()) // file number
-	stream.PutUvarint32(n.file.GetMinKey()) // min key
-	stream.PutUvarint32(n.file.GetMaxKey()) // max key
-	stream.PutInt32(n.file.GetFileSize())   // file size
-
-	return stream.Bytes()
+	writer.PutVarint32(n.level)                // level
+	writer.PutVarint64(n.file.GetFileNumber()) // file number
+	writer.PutUvarint32(n.file.GetMinKey())    // min key
+	writer.PutUvarint32(n.file.GetMaxKey())    // max key
+	writer.PutVarint32(n.file.GetFileSize())   // file size
+	return writer.Bytes()
 }
 
 // Decode reads new file from binary, if error return err
 func (n *NewFile) Decode(v []byte) error {
-	var stream = strm.BinaryReader(v)
+	reader := stream.NewReader(v)
 	// read level
-	n.level = stream.ReadInt32()
+	n.level = reader.ReadVarint32()
 	// read file meta
-	n.file = NewFileMeta(stream.ReadInt64(), stream.ReadUvarint32(), stream.ReadUvarint32(), stream.ReadInt32())
+	n.file = NewFileMeta(reader.ReadVarint64(), reader.ReadUvarint32(), reader.ReadUvarint32(), reader.ReadVarint32())
 	// if error, return it
-	return stream.Error()
+	return reader.Error()
 }
 
 // Apply new file edit log to version
@@ -117,22 +118,21 @@ func NewDeleteFile(level int32, fileNumber int64) *DeleteFile {
 
 // Encode writes delete file data into binary
 func (d *DeleteFile) Encode() ([]byte, error) {
-	var stream = strm.BinaryWriter()
+	writer := stream.NewBufferWriter(nil)
 
-	stream.PutInt32(d.level)
-	stream.PutInt64(d.fileNumber)
-
-	return stream.Bytes()
+	writer.PutVarint32(d.level)
+	writer.PutVarint64(d.fileNumber)
+	return writer.Bytes()
 }
 
 // Decode reads delete file data from binary
 func (d *DeleteFile) Decode(v []byte) error {
-	var stream = strm.BinaryReader(v)
+	reader := stream.NewReader(v)
 
-	d.level = stream.ReadInt32()
-	d.fileNumber = stream.ReadInt64()
+	d.level = reader.ReadVarint32()
+	d.fileNumber = reader.ReadVarint64()
 
-	return stream.Error()
+	return reader.Error()
 }
 
 // Apply removes file from version
@@ -154,16 +154,18 @@ func NewNextFileNumber(fileNumber int64) *NextFileNumber {
 
 // Encode writes next file number data into binary
 func (n *NextFileNumber) Encode() ([]byte, error) {
-	var stream = strm.BinaryWriter()
-	stream.PutInt64(n.fileNumber)
-	return stream.Bytes()
+	writer := stream.NewBufferWriter(nil)
+
+	writer.PutVarint64(n.fileNumber)
+	return writer.Bytes()
 }
 
 // Decode reads next file number data from binary
 func (n *NextFileNumber) Decode(v []byte) error {
-	var stream = strm.BinaryReader(v)
-	n.fileNumber = stream.ReadInt64()
-	return stream.Error()
+	reader := stream.NewReader(v)
+
+	n.fileNumber = reader.ReadVarint64()
+	return reader.Error()
 }
 
 // Apply do nothing for next file number
@@ -171,7 +173,7 @@ func (n *NextFileNumber) apply(version *Version) {
 	// do nothing
 }
 
-//applyVersionSet applies edito to store version set
-func (n *NextFileNumber) applyVersionSet(versionSet *StoreVersionSet) {
+//applyVersionSet applies edit to store version set
+func (n *NextFileNumber) applyVersionSet(versionSet StoreVersionSet) {
 	versionSet.setNextFileNumberWithoutLock(n.fileNumber)
 }

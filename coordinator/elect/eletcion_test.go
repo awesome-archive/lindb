@@ -1,73 +1,214 @@
 package elect
 
 import (
-	"sync/atomic"
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
-	"github.com/eleme/lindb/mock"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/state"
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 
-	"gopkg.in/check.v1"
+	"github.com/lindb/lindb/constants"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/pkg/encoding"
+	"github.com/lindb/lindb/pkg/state"
 )
 
-type mockListener struct {
-	onFailOverCount    int32
-	onResignationCount int32
-}
+func TestElection_Initialize(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-func newMockListener() Listener {
-	return &mockListener{}
-}
+	eventCh := make(chan *state.Event)
 
-func (l *mockListener) OnResignation() {
-	atomic.AddInt32(&l.onResignationCount, 1)
-}
+	repo := state.NewMockRepository(ctrl)
 
-func (l *mockListener) OnFailOver() {
-	atomic.AddInt32(&l.onFailOverCount, 1)
-}
-
-type testElectionSuite struct {
-	mock.RepoTestSuite
-}
-
-func TestElection(t *testing.T) {
-	check.Suite(&testElectionSuite{})
-	check.TestingT(t)
-}
-
-func (ts *testElectionSuite) TestElect(c *check.C) {
-	repo, _ := state.NewRepo(state.Config{
-		Endpoints: ts.Cluster.Endpoints,
-	})
-	listener1 := newMockListener()
-	l1, _ := listener1.(*mockListener)
+	listener1 := NewMockListener(ctrl)
 	node1 := models.Node{IP: "127.0.0.1", Port: 2080}
-	election := NewElection(repo, node1, 1, listener1)
+	repo.EXPECT().Watch(gomock.Any(), gomock.Any(), true).Return(nil)
+	election := NewElection(context.TODO(), repo, node1, 1, listener1)
 	election.Initialize()
-	election.Elect()
-
-	time.Sleep(500 * time.Millisecond)
-
-	c.Assert(int32(1), check.Equals, atomic.LoadInt32(&l1.onFailOverCount))
-
-	// second node election should be false
-	node2 := models.Node{IP: "127.0.0.2", Port: 2080}
-	listener2 := newMockListener()
-	l2, _ := listener2.(*mockListener)
-
-	election2 := NewElection(repo, node2, 1, listener2)
-	election2.Initialize()
-	election2.Elect()
-
-	// cancel first node
 	election.Close()
 
-	time.Sleep(500 * time.Millisecond)
-	// second node become master
-	c.Assert(int32(1), check.Equals, atomic.LoadInt32(&l2.onFailOverCount))
+	repo.EXPECT().Watch(gomock.Any(), gomock.Any(), true).Return(eventCh)
+	election = NewElection(context.TODO(), repo, node1, 1, listener1)
+	election.Initialize()
+	election.Close()
+}
 
-	election2.Close()
+func TestElection_Elect(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	repo := state.NewMockRepository(ctrl)
+	listener1 := NewMockListener(ctrl)
+
+	node1 := models.Node{IP: "127.0.0.1", Port: 2080}
+	repo.EXPECT().Watch(gomock.Any(), gomock.Any(), true).Return(nil)
+	election := NewElection(context.TODO(), repo, node1, 1, listener1)
+	election.Initialize()
+	election.Elect()
+	election.Close()
+}
+
+func TestElection_elect(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	ctx, cancel := context.WithCancel(context.TODO())
+	repo := state.NewMockRepository(ctrl)
+	listener1 := NewMockListener(ctrl)
+
+	node1 := models.Node{IP: "127.0.0.1", Port: 2080}
+	repo.EXPECT().Watch(gomock.Any(), gomock.Any(), true).Return(nil)
+	election1 := NewElection(ctx, repo, node1, 1, listener1)
+	election1.Initialize()
+	e := election1.(*election)
+	time.AfterFunc(700*time.Millisecond, func() {
+		e.retryCh <- 1
+		time.Sleep(10 * time.Millisecond)
+		close(e.retryCh)
+		cancel()
+	})
+
+	//fail
+	repo.EXPECT().Elect(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(false, nil, fmt.Errorf("err"))
+	// success
+	repo.EXPECT().Elect(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(true, nil, nil).AnyTimes()
+	e.elect()
+
+	election1.Close()
+}
+
+func TestElection_Handle_Event(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	repo := state.NewMockRepository(ctrl)
+
+	listener1 := NewMockListener(ctrl)
+	node1 := models.Node{IP: "127.0.0.1", Port: 2080}
+	repo.EXPECT().Watch(gomock.Any(), gomock.Any(), true).Return(nil)
+	election1 := NewElection(context.TODO(), repo, node1, 1, listener1)
+	election1.Initialize()
+	e := election1.(*election)
+
+	eventCh := make(chan *state.Event)
+
+	go func() {
+		sendEvent(eventCh, &state.Event{
+			Type: state.EventTypeModify,
+			KeyValues: []state.EventKeyValue{
+				{Key: constants.MasterPath, Value: []byte{1, 1, 2}},
+			},
+		})
+		sendEvent(eventCh, &state.Event{
+			Type: state.EventTypeAll,
+		})
+		sendEvent(eventCh, &state.Event{
+			Type: state.EventTypeModify,
+			Err:  fmt.Errorf("err"),
+		})
+		data := encoding.JSONMarshal(&models.Master{Node: node1})
+		listener1.EXPECT().OnFailOver().Return(nil)
+		sendEvent(eventCh, &state.Event{
+			Type: state.EventTypeModify,
+			KeyValues: []state.EventKeyValue{
+				{Key: constants.MasterPath, Value: data},
+			},
+		})
+
+		assert.True(t, e.IsMaster())
+
+		// close chan
+		close(eventCh)
+	}()
+
+	e.handleMasterChange(eventCh)
+	repo.EXPECT().Delete(gomock.Any(), gomock.Any()).Return(nil)
+	election1.Close()
+}
+
+func TestElection_handle_event(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	repo := state.NewMockRepository(ctrl)
+	listener1 := NewMockListener(ctrl)
+
+	node1 := models.Node{IP: "127.0.0.1", Port: 2080}
+	repo.EXPECT().Watch(gomock.Any(), gomock.Any(), true).Return(nil)
+	election1 := NewElection(context.TODO(), repo, node1, 1, listener1)
+	assert.Nil(t, election1.GetMaster())
+	election1.Initialize()
+	e := election1.(*election)
+	data := encoding.JSONMarshal(&models.Master{Node: node1})
+	time.AfterFunc(10*time.Millisecond, func() {
+		<-e.retryCh
+	})
+	listener1.EXPECT().OnFailOver().Return(fmt.Errorf("err"))
+	e.handleEvent(&state.Event{
+		Type: state.EventTypeModify,
+		KeyValues: []state.EventKeyValue{
+			{Key: constants.MasterPath, Value: data},
+		},
+	})
+	assert.False(t, e.IsMaster())
+	assert.Nil(t, e.GetMaster())
+
+	listener1.EXPECT().OnFailOver().Return(nil)
+	e.handleEvent(&state.Event{
+		Type: state.EventTypeModify,
+		KeyValues: []state.EventKeyValue{
+			{Key: constants.MasterPath, Value: data},
+		},
+	})
+	assert.True(t, e.IsMaster())
+	assert.Equal(t, node1, e.GetMaster().Node)
+
+	time.AfterFunc(100*time.Millisecond, func() {
+		<-e.retryCh
+	})
+
+	listener1.EXPECT().OnResignation()
+	repo.EXPECT().Delete(gomock.Any(), gomock.Any()).Return(fmt.Errorf("err"))
+	e.handleEvent(&state.Event{
+		Type: state.EventTypeDelete,
+	})
+	assert.False(t, e.IsMaster())
+	assert.Equal(t, models.Master{}, *e.GetMaster())
+
+	election1.Close()
+}
+
+func TestElection_Err(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	repo := state.NewMockRepository(ctrl)
+	listener1 := NewMockListener(ctrl)
+
+	node1 := models.Node{IP: "127.0.0.1", Port: 2080}
+	election1 := NewElection(context.TODO(), repo, node1, 1, listener1)
+	election1.Close()
+	e := election1.(*election)
+	e.elect()
+	election1.Close()
+
+	election1 = NewElection(context.TODO(), repo, node1, 1, listener1)
+
+	time.AfterFunc(100*time.Millisecond, func() {
+		election1.Close()
+	})
+	repo.EXPECT().Elect(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(true, nil, nil).AnyTimes()
+	e = election1.(*election)
+	e.elect()
+}
+
+func sendEvent(eventCh chan *state.Event, event *state.Event) {
+	eventCh <- event
+	time.Sleep(100 * time.Millisecond)
 }

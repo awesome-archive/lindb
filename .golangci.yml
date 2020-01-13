@@ -6,7 +6,8 @@ run:
     skip-dirs:
         - vendor
         - bin
-    # modules-download-mode: readonly
+        - ci
+        - cmd
 
 
 output:
@@ -26,9 +27,9 @@ linters-settings:
     gofmt:
         simplify: true
     goimports:
-        local-prefixes: github.com/eleme/lindb
+        local-prefixes: github.com/lindb/lindb
     gocyclo:
-        min-complexity: 16
+        min-complexity: 60
     maligned:
         suggest-new: true
     dupl:
@@ -39,7 +40,7 @@ linters-settings:
     misspell:
         locale: US
     lll:
-        line-length: 120
+        line-length: 150
         tab-width: 1
     unused:
         check-exported: false
@@ -80,6 +81,7 @@ linters-settings:
 linters:
     enable-all: true
     disable:
+        - funlen
         - unused
         - ineffassign
         - maligned

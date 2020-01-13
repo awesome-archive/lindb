@@ -3,26 +3,27 @@ package storage
 import (
 	"context"
 	"fmt"
+	"os"
 
-	"github.com/eleme/lindb/config"
-	"github.com/eleme/lindb/constants"
-	"github.com/eleme/lindb/coordinator/discovery"
-	task "github.com/eleme/lindb/coordinator/storage"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/logger"
-	"github.com/eleme/lindb/pkg/server"
-	"github.com/eleme/lindb/pkg/state"
-	"github.com/eleme/lindb/pkg/util"
-	"github.com/eleme/lindb/rpc"
-	"github.com/eleme/lindb/rpc/proto/storage"
-	"github.com/eleme/lindb/service"
-	"github.com/eleme/lindb/storage/handler"
-)
-
-const (
-	storageCfgName = "storage.toml"
-	// DefaultStorageCfgFile defines storage default config file path
-	DefaultStorageCfgFile = "./" + storageCfgName
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/constants"
+	"github.com/lindb/lindb/coordinator/discovery"
+	task "github.com/lindb/lindb/coordinator/storage"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/monitoring"
+	taskHandler "github.com/lindb/lindb/parallel"
+	"github.com/lindb/lindb/pkg/hostutil"
+	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/server"
+	"github.com/lindb/lindb/pkg/state"
+	"github.com/lindb/lindb/pkg/timeutil"
+	"github.com/lindb/lindb/query"
+	"github.com/lindb/lindb/rpc"
+	"github.com/lindb/lindb/rpc/proto/common"
+	"github.com/lindb/lindb/rpc/proto/storage"
+	"github.com/lindb/lindb/service"
+	"github.com/lindb/lindb/storage/handler"
+	"github.com/lindb/lindb/tsdb"
 )
 
 // srv represents all dependency services
@@ -30,68 +31,85 @@ type srv struct {
 	storageService service.StorageService
 }
 
+// factory represents all factories for storage
+type factory struct {
+	taskServer rpc.TaskServerFactory
+}
+
 // rpcHandler represents all dependency rpc handlers
 type rpcHandler struct {
 	writer *handler.Writer
+	task   *taskHandler.TaskHandler
 }
+
+// just for testing
+var getHostIP = hostutil.GetHostIP
+var hostName = os.Hostname
 
 // runtime represents storage runtime dependency
 type runtime struct {
 	state   server.State
-	cfgPath string
+	version string
 	config  config.Storage
 
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	node         models.Node
-	server       rpc.TCPServer
+	server       rpc.GRPCServer
+	repoFactory  state.RepositoryFactory
 	repo         state.Repository
 	registry     discovery.Registry
 	taskExecutor *task.TaskExecutor
+	factory      factory
 	srv          srv
+	handler      *rpcHandler
 
 	log *logger.Logger
 }
 
 // NewStorageRuntime creates storage runtime
-func NewStorageRuntime(cfgPath string) server.Service {
+func NewStorageRuntime(version string, config config.Storage) server.Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &runtime{
-		state:   server.New,
-		cfgPath: cfgPath,
-		ctx:     ctx,
-		cancel:  cancel,
+		state:       server.New,
+		repoFactory: state.NewRepositoryFactory("storage"),
+		version:     version,
+		config:      config,
+		ctx:         ctx,
+		cancel:      cancel,
 
-		log: logger.GetLogger("storage/runtime"),
+		log: logger.GetLogger("storage", "Runtime"),
 	}
+}
+
+// Name returns the storage service's name
+func (r *runtime) Name() string {
+	return "storage"
 }
 
 // Run runs storage server
 func (r *runtime) Run() error {
-	if r.cfgPath == "" {
-		r.cfgPath = DefaultStorageCfgFile
-	}
-	if !util.Exist(r.cfgPath) {
-		r.state = server.Failed
-		return fmt.Errorf("config file doesn't exist, see how to initialize the config by `lind storage -h`")
-	}
-	r.config = config.Storage{}
-	if err := util.DecodeToml(r.cfgPath, &r.config); err != nil {
-		r.state = server.Failed
-		return fmt.Errorf("decode config file error:%s", err)
-	}
-
-	ip, err := util.GetHostIP()
+	ip, err := getHostIP()
 	if err != nil {
 		r.state = server.Failed
 		return fmt.Errorf("cannot get server ip address, error:%s", err)
 	}
 
 	// build service dependency for storage server
-	r.buildServiceDependency()
+	if err := r.buildServiceDependency(); err != nil {
+		r.state = server.Failed
+		return err
+	}
+	hostName, err := hostName()
+	if err != nil {
+		r.log.Error("get host name with error", logger.Error(err))
+		hostName = "unknown"
+	}
+	r.node = models.Node{IP: ip, Port: r.config.StorageBase.GRPC.Port, HostName: hostName}
 
-	r.node = models.Node{IP: ip, Port: r.config.Server.Port}
+	r.factory = factory{taskServer: rpc.NewTaskServerFactory()}
+
 	// start tcp server
 	r.startTCPServer()
 
@@ -103,7 +121,7 @@ func (r *runtime) Run() error {
 
 	// register storage node info
 	//TODO TTL default value???
-	r.registry = discovery.NewRegistry(r.repo, constants.ActiveNodesPath, r.config.Server.TTL)
+	r.registry = discovery.NewRegistry(r.repo, constants.ActiveNodesPath, r.config.StorageBase.GRPC.TTL.Duration())
 	if err := r.registry.Register(r.node); err != nil {
 		return fmt.Errorf("register storage node error:%s", err)
 	}
@@ -111,6 +129,8 @@ func (r *runtime) Run() error {
 	r.taskExecutor = task.NewTaskExecutor(r.ctx, &r.node, r.repo, r.srv.storageService)
 	r.taskExecutor.Run()
 
+	// start stat monitoring
+	r.monitoring()
 	r.state = server.Running
 	return nil
 }
@@ -122,7 +142,7 @@ func (r *runtime) State() server.State {
 
 // startStateRepo starts state repository
 func (r *runtime) startStateRepo() error {
-	repo, err := state.NewRepo(r.config.Coordinator)
+	repo, err := r.repoFactory.CreateRepo(r.config.StorageBase.Coordinator)
 	if err != nil {
 		return fmt.Errorf("start storage state repository error:%s", err)
 	}
@@ -144,7 +164,7 @@ func (r *runtime) Stop() error {
 	// close registry, deregister storage node from active list
 	if r.registry != nil {
 		if err := r.registry.Close(); err != nil {
-			r.log.Error("unregister storage error", logger.Error(err))
+			r.log.Error("unregister storage node error", logger.Error(err))
 		}
 	}
 
@@ -161,22 +181,33 @@ func (r *runtime) Stop() error {
 		r.log.Info("stopping grpc server")
 		r.server.Stop()
 	}
+
+	// close the storage engine
+	if r.srv.storageService != nil {
+		r.srv.storageService.Close()
+	}
+
 	r.log.Info("storage server stop complete")
 	r.state = server.Terminated
 	return nil
 }
 
 // buildServiceDependency builds broker service dependency
-func (r *runtime) buildServiceDependency() {
+func (r *runtime) buildServiceDependency() error {
+	engine, err := tsdb.NewEngine(r.config.StorageBase.TSDB)
+	if err != nil {
+		return err
+	}
 	srv := srv{
-		storageService: service.NewStorageService(r.config.Engine),
+		storageService: service.NewStorageService(engine),
 	}
 	r.srv = srv
+	return nil
 }
 
 // startTCPServer starts tcp server
 func (r *runtime) startTCPServer() {
-	r.server = rpc.NewTCPServer(fmt.Sprintf("%s:%d", r.node.IP, r.node.Port))
+	r.server = rpc.NewGRPCServer(fmt.Sprintf(":%d", r.node.Port))
 
 	// bind rpc handlers
 	r.bindRPCHandlers()
@@ -190,9 +221,46 @@ func (r *runtime) startTCPServer() {
 
 // bindRPCHandlers binds rpc handlers, registers handler into grpc server
 func (r *runtime) bindRPCHandlers() {
-	handlers := rpcHandler{
+	//FIXME: (stone1100) need close
+	dispatcher := taskHandler.NewLeafTaskDispatcher(r.node, r.srv.storageService,
+		query.NewExecutorFactory(), r.factory.taskServer)
+
+	r.handler = &rpcHandler{
 		writer: handler.NewWriter(r.srv.storageService),
+		task:   taskHandler.NewTaskHandler(r.config.StorageBase.Query, r.factory.taskServer, dispatcher),
 	}
 
-	storage.RegisterWriteServiceServer(r.server.GetServer(), handlers.writer)
+	//TODO add task service ??????
+	storage.RegisterWriteServiceServer(r.server.GetServer(), r.handler.writer)
+	common.RegisterTaskServiceServer(r.server.GetServer(), r.handler.task)
+}
+
+func (r *runtime) monitoring() {
+	systemStatMonitorEnabled := r.config.Monitor.SystemReportInterval > 0
+	if systemStatMonitorEnabled {
+		r.log.Info("SystemStatMonitor is running")
+		go monitoring.NewSystemCollector(
+			r.ctx,
+			r.config.Monitor.SystemReportInterval.Duration(),
+			r.config.StorageBase.TSDB.Dir,
+			r.repo,
+			constants.GetNodeMonitoringStatPath(r.node.Indicator()),
+			models.ActiveNode{
+				Version:    r.version,
+				Node:       r.node,
+				OnlineTime: timeutil.Now(),
+			}).Run()
+	}
+
+	// todo: @stone1100, how to retrieve the broker port?
+	runtimeStatMonitorEnabled := r.config.Monitor.RuntimeReportInterval > 0
+	if runtimeStatMonitorEnabled {
+		r.log.Info("RuntimeStatMonitor is running")
+		go monitoring.NewRunTimeCollector(
+			r.ctx,
+			fmt.Sprintf("http://localhost:%d/", r.config.StorageBase.GRPC),
+			r.config.Monitor.RuntimeReportInterval.Duration(),
+			map[string]string{"role": "broker", "version": r.version},
+		)
+	}
 }

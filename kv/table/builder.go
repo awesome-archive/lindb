@@ -3,21 +3,19 @@ package table
 import (
 	"encoding/binary"
 	"fmt"
-	"path/filepath"
 
-	"github.com/eleme/lindb/kv/version"
-	"github.com/eleme/lindb/pkg/bufioutil"
-	"github.com/eleme/lindb/pkg/encoding"
-	"github.com/eleme/lindb/pkg/logger"
+	"github.com/lindb/roaring"
 
-	"github.com/RoaringBitmap/roaring"
+	"github.com/lindb/lindb/pkg/bufioutil"
+	"github.com/lindb/lindb/pkg/encoding"
+	"github.com/lindb/lindb/pkg/logger"
 )
 
 //go:generate mockgen -source ./builder.go -destination=./builder_mock.go -package table
 
 const (
 	// magic-number in the footer of sst file
-	magicNumberOffsetFile uint64 = 7308327815838786409
+	magicNumberOffsetFile uint64 = 0x69632d656d656c65
 	// current file layout version
 	version0 = 0
 )
@@ -37,6 +35,8 @@ type Builder interface {
 	Size() int32
 	// Count returns the number of k/v pairs contained in the store
 	Count() uint64
+	// Abandon abandons current store build for some reason
+	Abandon() error
 	// Close closes sst file write buffer
 	Close() error
 }
@@ -59,10 +59,8 @@ type storeBuilder struct {
 }
 
 // NewStoreBuilder creates store builder instance for building store file
-func NewStoreBuilder(path string, fileNumber int64) (Builder, error) {
-	fileName := filepath.Join(path, version.Table(fileNumber))
-	keys := roaring.New()
-	log := logger.GetLogger(fmt.Sprintf("kv/builder[%s]", fileName))
+func NewStoreBuilder(fileNumber int64, fileName string) (Builder, error) {
+	log := logger.GetLogger("kv", fmt.Sprintf("Builder[%s]", fileName))
 	writer, err := bufioutil.NewBufioWriter(fileName)
 	if err != nil {
 		return nil, fmt.Errorf("create file write for store builder error:%s", err)
@@ -70,7 +68,7 @@ func NewStoreBuilder(path string, fileNumber int64) (Builder, error) {
 	return &storeBuilder{
 		fileNumber: fileNumber,
 		fileName:   fileName,
-		keys:       keys,
+		keys:       roaring.New(),
 		logger:     log,
 		writer:     writer,
 		first:      true,
@@ -131,14 +129,16 @@ func (b *storeBuilder) Count() uint64 {
 	return b.keys.GetCardinality()
 }
 
+// Abandon abandons current store build for some reason, for example compaction job fail or memory store dump error
+func (b *storeBuilder) Abandon() error {
+	return b.writer.Close()
+}
+
 // Close writes file footer before closing resources
 func (b *storeBuilder) Close() error {
 	posOfOffset := b.writer.Size()
-	offset, err := b.offset.Bytes()
-	if err != nil {
-		return fmt.Errorf("marshal store table offsets error:%s", err)
-	}
-	if _, err = b.writer.Write(offset); err != nil {
+	offset := b.offset.Bytes()
+	if _, err := b.writer.Write(offset); err != nil {
 		return err
 	}
 
@@ -154,10 +154,10 @@ func (b *storeBuilder) Close() error {
 
 	// for file footer for offsets/keys index, length=1+4+4+8
 	var buf [17]byte
-	binary.BigEndian.PutUint32(buf[:4], uint32(posOfOffset))
-	binary.BigEndian.PutUint32(buf[4:8], uint32(posOfKeys))
+	binary.LittleEndian.PutUint32(buf[:4], uint32(posOfOffset))
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(posOfKeys))
 	buf[8] = version0
-	binary.BigEndian.PutUint64(buf[9:], magicNumberOffsetFile)
+	binary.LittleEndian.PutUint64(buf[9:], magicNumberOffsetFile)
 	if _, err = b.writer.Write(buf[:]); err != nil {
 		return err
 	}

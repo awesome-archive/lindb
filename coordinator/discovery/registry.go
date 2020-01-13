@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/logger"
-	"github.com/eleme/lindb/pkg/pathutil"
-	"github.com/eleme/lindb/pkg/state"
+	"github.com/lindb/lindb/constants"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/state"
+	"github.com/lindb/lindb/pkg/timeutil"
 )
+
+//go:generate mockgen -source=./registry.go -destination=./registry_mock.go -package=discovery
 
 // Registry represents server node register
 type Registry interface {
@@ -24,7 +27,7 @@ type Registry interface {
 // registry implements registry interface for server node register with prefix
 type registry struct {
 	prefix string
-	ttl    int64
+	ttl    time.Duration
 	repo   state.Repository
 
 	ctx    context.Context
@@ -34,7 +37,11 @@ type registry struct {
 }
 
 // NewRegistry returns a new registry with prefix and ttl
-func NewRegistry(repo state.Repository, prefix string, ttl int64) Registry {
+func NewRegistry(
+	repo state.Repository,
+	prefix string,
+	ttl time.Duration,
+) Registry {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &registry{
 		prefix: prefix,
@@ -42,27 +49,22 @@ func NewRegistry(repo state.Repository, prefix string, ttl int64) Registry {
 		repo:   repo,
 		ctx:    ctx,
 		cancel: cancel,
-		log:    logger.GetLogger("coondinator/registry"),
+		log:    logger.GetLogger("coordinator", "Registry"),
 	}
 }
 
 // Register registers node info, add it to active node list for discovery
 func (r *registry) Register(node models.Node) error {
-	nodeBytes, err := json.Marshal(node)
-	if err != nil {
-		r.log.Error("convert node to byte error when register node info", logger.Error(err))
-		return err
-	}
 	// register node info
-	path := pathutil.GetNodePath(r.prefix, node.String())
+	path := constants.GetNodePath(r.prefix, node.Indicator())
 	// register node if fail retry it
-	go r.register(path, nodeBytes)
+	go r.register(path, node)
 	return nil
 }
 
 // Deregister deregisters node info, remove it from active list
 func (r *registry) Deregister(node models.Node) error {
-	return r.repo.Delete(r.ctx, pathutil.GetNodePath(r.prefix, node.String()))
+	return r.repo.Delete(r.ctx, constants.GetNodePath(r.prefix, node.Indicator()))
 }
 
 // Close closes registry, releases resources
@@ -72,20 +74,22 @@ func (r *registry) Close() error {
 }
 
 // register registers node info, if fail do retry
-func (r *registry) register(path string, node []byte) {
+func (r *registry) register(path string, node models.Node) {
 	for {
 		// if ctx happen err, exit register loop
 		if r.ctx.Err() != nil {
 			return
 		}
-		closed, err := r.repo.Heartbeat(r.ctx, path, node, r.ttl)
+		nodeBytes, _ := json.Marshal(&models.ActiveNode{OnlineTime: timeutil.Now(), Node: node})
+
+		closed, err := r.repo.Heartbeat(r.ctx, path, nodeBytes, int64(r.ttl.Seconds()))
 		if err != nil {
-			r.log.Error("register storage node error", logger.Error(err))
+			r.log.Error("register node error", logger.Error(err))
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 
-		r.log.Info("register storage node successfully", logger.String("path", path))
+		r.log.Info("register node successfully", logger.String("path", path))
 
 		select {
 		case <-r.ctx.Done():

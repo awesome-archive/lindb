@@ -2,7 +2,6 @@ package state
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	etcdcliv3 "github.com/coreos/etcd/clientv3"
@@ -14,21 +13,24 @@ const (
 )
 
 type watcher struct {
-	ctx  context.Context
-	cli  *etcdRepository
-	key  string
-	opts []etcdcliv3.OpOption
+	ctx      context.Context
+	cli      *etcdRepository
+	key      string
+	fetchVal bool
+	opts     []etcdcliv3.OpOption
 
 	EventC WatchEventChan
 }
 
-func newWatcher(ctx context.Context, cli *etcdRepository, key string, opts ...etcdcliv3.OpOption) *watcher {
+func newWatcher(ctx context.Context,
+	cli *etcdRepository, key string, fetchVal bool, opts ...etcdcliv3.OpOption) *watcher {
 	eventc := make(chan *Event)
 	w := &watcher{
-		ctx:  ctx,
-		cli:  cli,
-		key:  key,
-		opts: opts,
+		ctx:      ctx,
+		cli:      cli,
+		key:      key,
+		opts:     opts,
+		fetchVal: fetchVal,
 
 		EventC: eventc,
 	}
@@ -36,8 +38,8 @@ func newWatcher(ctx context.Context, cli *etcdRepository, key string, opts ...et
 	return w
 }
 
-func (w *watcher) watch(eventc chan<- *Event) {
-	defer close(eventc)
+func (w *watcher) watch(eventCh chan<- *Event) {
+	defer close(eventCh)
 
 	cli := w.cli.client
 	var evtAll *Event
@@ -59,7 +61,7 @@ func (w *watcher) watch(eventc chan<- *Event) {
 		select {
 		case <-w.ctx.Done():
 			return
-		case eventc <- evtAll:
+		case eventCh <- evtAll:
 		}
 
 		opts := append(w.opts, etcdcliv3.WithRev(resp.Header.Revision+1))
@@ -72,7 +74,7 @@ func (w *watcher) watch(eventc chan<- *Event) {
 				select {
 				case <-w.ctx.Done():
 					return
-				case eventc <- &Event{Err: err}:
+				case eventCh <- &Event{Err: err}:
 				}
 				continue
 			}
@@ -80,18 +82,11 @@ func (w *watcher) watch(eventc chan<- *Event) {
 				select {
 				case <-w.ctx.Done():
 					return
-				case eventc <- w.packWatchEvent(event):
+				case eventCh <- w.packWatchEvent(event):
 				}
 			}
 		}
 	}
-}
-
-func (w *watcher) parseKey(key string) string {
-	if len(w.cli.namespace) == 0 {
-		return key
-	}
-	return strings.Replace(key, w.cli.namespace, "", 1)
 }
 
 func (w *watcher) packWatchEvent(watchEvent *etcdcliv3.Event) *Event {
@@ -99,7 +94,7 @@ func (w *watcher) packWatchEvent(watchEvent *etcdcliv3.Event) *Event {
 	evt := &Event{
 		Type: EventTypeModify,
 		KeyValues: []EventKeyValue{
-			{Key: w.parseKey(string(kv.Key)), Value: kv.Value, Rev: kv.ModRevision},
+			{Key: w.cli.parseKey(string(kv.Key)), Value: kv.Value, Rev: kv.ModRevision},
 		},
 	}
 	if watchEvent.Type == mvccpb.DELETE {
@@ -112,7 +107,7 @@ func (w *watcher) packAllEvents(kvs []*mvccpb.KeyValue) *Event {
 	evt := &Event{Type: EventTypeAll}
 	for _, kv := range kvs {
 		evt.KeyValues = append(evt.KeyValues, EventKeyValue{
-			Key:   w.parseKey(string(kv.Key)),
+			Key:   w.cli.parseKey(string(kv.Key)),
 			Value: kv.Value,
 			Rev:   kv.ModRevision,
 		})

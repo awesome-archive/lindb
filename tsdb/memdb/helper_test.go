@@ -3,73 +3,45 @@ package memdb
 import (
 	"math/rand"
 	"runtime"
+	"sort"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/field"
-	"github.com/eleme/lindb/pkg/lockers"
-	"github.com/eleme/lindb/pkg/timeutil"
-	"github.com/eleme/lindb/tsdb/index"
-	"github.com/eleme/lindb/tsdb/metrictbl"
+	"github.com/lindb/lindb/tsdb/tblstore/metricsdata"
 
 	"github.com/golang/mock/gomock"
+
+	"github.com/lindb/lindb/pkg/lockers"
+	"github.com/lindb/lindb/tsdb/metadb"
 )
 
 ///////////////////////////////////////////////////
 //                mock interface
 ///////////////////////////////////////////////////
 
-func makeMockIDGenerator(ctrl *gomock.Controller) *index.MockIDGenerator {
-	mockGen := index.NewMockIDGenerator(ctrl)
-	mockGen.EXPECT().GenTSID(gomock.Any(), gomock.Any()).
-		Return(uint32(2222)).AnyTimes()
+func makeMockIDGenerator(ctrl *gomock.Controller) *metadb.MockIDGenerator {
+	mockGen := metadb.NewMockIDGenerator(ctrl)
 	mockGen.EXPECT().GenFieldID(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(uint32(1111)).AnyTimes()
+		Return(uint16(1111), nil).AnyTimes()
 	mockGen.EXPECT().GenMetricID(gomock.Any()).
 		Return(uint32(3333)).AnyTimes()
-
+	mockGen.EXPECT().GenTagKeyID(gomock.Any(), gomock.Any()).Return(uint32(3333)).AnyTimes()
 	return mockGen
 }
 
-func makeMockTableWriter(ctrl *gomock.Controller) *metrictbl.MockTableWriter {
-	mockTW := metrictbl.NewMockTableWriter(ctrl)
-	mockTW.EXPECT().WriteField(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+func makeMockDataFlusher(ctrl *gomock.Controller) *metricsdata.MockFlusher {
+	mockTF := metricsdata.NewMockFlusher(ctrl)
+	mockTF.EXPECT().FlushFieldMetas(gomock.Any()).Return().AnyTimes()
+	mockTF.EXPECT().FlushField(gomock.Any()).
 		Return().AnyTimes()
-	mockTW.EXPECT().WriteTSEntry(gomock.Any()).
+	mockTF.EXPECT().FlushSeries().
 		Return().AnyTimes()
-	mockTW.EXPECT().WriteMetricBlock(gomock.Any()).
+	mockTF.EXPECT().FlushMetric(gomock.Any()).
 		Return(nil).AnyTimes()
-	mockTW.EXPECT().Close().Return(nil).AnyTimes()
+	mockTF.EXPECT().Commit().Return(nil).AnyTimes()
 
-	return mockTW
-}
-
-func makeMockPoint(ctrl *gomock.Controller) *models.MockPoint {
-	mockPoint := models.NewMockPoint(ctrl)
-
-	mockPoint.EXPECT().Name().Return("cpu.load").AnyTimes()
-	mockPoint.EXPECT().Tags().Return("idle").AnyTimes()
-	mockPoint.EXPECT().Timestamp().Return(timeutil.Now()).AnyTimes()
-
-	fakeFields := make(map[string]models.Field)
-	fakeHistogram := models.NewMockField(ctrl)
-	fakeHistogram.EXPECT().Type().Return(field.HistogramField).AnyTimes()
-	fakeHistogram.EXPECT().IsComplex().Return(true).AnyTimes()
-	fakeFields["histogram"] = fakeHistogram
-
-	fakeMax := models.NewMockSimpleField(ctrl)
-	fakeMax.EXPECT().ValueType().Return(field.Integer).AnyTimes()
-	fakeMax.EXPECT().AggType().Return(field.Sum).AnyTimes()
-	fakeMax.EXPECT().Type().Return(field.SumField).AnyTimes()
-	fakeMax.EXPECT().Value().Return(1).AnyTimes()
-	fakeMax.EXPECT().IsComplex().Return(false).AnyTimes()
-
-	fakeFields["max"] = fakeMax
-
-	mockPoint.EXPECT().Fields().Return(fakeFields).AnyTimes()
-	return mockPoint
+	return mockTF
 }
 
 ///////////////////////////////////////////////////
@@ -205,5 +177,53 @@ func Benchmark_spinLockMap(b *testing.B) {
 		}()
 	}
 	wg.Wait()
+}
 
+func Benchmark_100000_get_map(b *testing.B) {
+	m := make(map[int]struct{})
+	for i := 0; i < 100000; i++ {
+		m[i] = struct{}{}
+	}
+
+	for x := 0; x < b.N; x++ {
+		_ = m[1]
+	}
+}
+
+func Benchmark_100000_get_slice(b *testing.B) {
+	var m []int
+	for i := 0; i < 100000; i++ {
+		m = append(m, i)
+	}
+	for x := 0; x < b.N; x++ {
+		idx := sort.Search(len(m), func(z int) bool {
+			return m[z] >= 1
+		})
+		_ = m[idx]
+	}
+}
+
+func Benchmark_100000_map_iterate(b *testing.B) {
+	m := make(map[int]struct{})
+	for i := 0; i < 100000; i++ {
+		m[i] = struct{}{}
+	}
+
+	for x := 0; x < b.N; x++ {
+		for k, v := range m {
+			_, _ = k, v
+		}
+	}
+}
+
+func Benchmark_100000_slice_iterate(b *testing.B) {
+	var m []int
+	for i := 0; i < 100000; i++ {
+		m = append(m, i)
+	}
+	for x := 0; x < b.N; x++ {
+		for k, v := range m {
+			_, _ = k, v
+		}
+	}
 }

@@ -3,19 +3,28 @@ package state
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/mock"
 
-	"github.com/eleme/lindb/mock"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewRepo(t *testing.T) {
 	cluster := mock.StartEtcdCluster(t)
 	defer cluster.Terminate(t)
-	cfg := Config{
+	cfg := config.RepoState{
 		Endpoints: cluster.Endpoints,
 	}
 
-	repo, err := NewRepo(cfg)
+	factory := NewRepositoryFactory("nobody")
+	repo, err := factory.CreateRepo(cfg)
 	assert.Nil(t, err)
 	assert.NotNil(t, repo)
+}
+
+func TestEventType_String(t *testing.T) {
+	assert.Equal(t, "delete", EventTypeDelete.String())
+	assert.Equal(t, "modify", EventTypeModify.String())
+	assert.Equal(t, "all", EventTypeAll.String())
+	assert.Equal(t, "unknown", EventType(111).String())
 }

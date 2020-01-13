@@ -2,30 +2,29 @@ package lind
 
 import (
 	"fmt"
-	_ "net/http/pprof" // for profiling
 
-	"github.com/eleme/lindb/broker"
-	"github.com/eleme/lindb/config"
-	"github.com/eleme/lindb/pkg/util"
+	"github.com/lindb/lindb/broker"
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/ltoml"
 
 	"github.com/spf13/cobra"
 )
 
-var (
-	brokerCfgPath = ""
-	brokerDebug   = false
+const (
+	brokerCfgName        = "broker.toml"
+	defaultBrokerCfgFile = "./" + brokerCfgName
 )
 
 // newBrokerCmd returns a new broker-cmd
 func newBrokerCmd() *cobra.Command {
 	brokerCmd := &cobra.Command{
-		Use:     "broker",
-		Aliases: []string{"bro"},
-		Short:   "The compute layer of LinDB",
+		Use:   "broker",
+		Short: "Run as a compute node with cluster mode enabled",
 	}
-	runBrokerCmd.PersistentFlags().StringVar(&brokerCfgPath, "config", "",
-		fmt.Sprintf("broker config file path, default is %s", broker.DefaultBrokerCfgFile))
-	runBrokerCmd.PersistentFlags().BoolVar(&brokerDebug, "debug", false,
+	runBrokerCmd.PersistentFlags().StringVar(&cfg, "config", "",
+		fmt.Sprintf("broker config file path, default is %s", defaultBrokerCfgFile))
+	runBrokerCmd.PersistentFlags().BoolVar(&debug, "debug", false,
 		"profiling Go programs with pprof")
 	brokerCmd.AddCommand(
 		runBrokerCmd,
@@ -42,15 +41,17 @@ var runBrokerCmd = &cobra.Command{
 
 // initialize config for broker
 var initializeBrokerConfigCmd = &cobra.Command{
-	Use:   "initialize-config",
-	Short: "initialize a new broker-config by steps",
+	Use:   "init-config",
+	Short: "create a new default broker-config",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := brokerCfgPath
+		path := cfg
 		if len(path) == 0 {
-			path = broker.DefaultBrokerCfgFile
+			path = defaultBrokerCfgFile
 		}
-		defaultCfg := config.NewDefaultBrokerCfg()
-		return util.EncodeToml(path, &defaultCfg)
+		if err := checkExistenceOf(path); err != nil {
+			return err
+		}
+		return ltoml.WriteConfig(path, config.NewDefaultBrokerTOML())
 	},
 }
 
@@ -58,19 +59,18 @@ var initializeBrokerConfigCmd = &cobra.Command{
 func serveBroker(cmd *cobra.Command, args []string) error {
 	ctx := newCtxWithSignals()
 
+	brokerCfg := config.Broker{}
+	if err := ltoml.LoadConfig(cfg, defaultBrokerCfgFile, &brokerCfg); err != nil {
+		return fmt.Errorf("decode config file error: %s", err)
+	}
+	if err := logger.InitLogger(brokerCfg.Logging); err != nil {
+		return fmt.Errorf("init logger error: %s", err)
+	}
+
 	// start broker server
-	brokerRuntime := broker.NewBrokerRuntime(brokerCfgPath)
-	if err := brokerRuntime.Run(); err != nil {
-		return fmt.Errorf("run broker server error:%s", err)
+	brokerRuntime := broker.NewBrokerRuntime(getVersion(), brokerCfg)
+	if err := run(ctx, brokerRuntime); err != nil {
+		return err
 	}
-
-	// waiting system exit signal
-	<-ctx.Done()
-
-	// stop broker server
-	if err := brokerRuntime.Stop(); err != nil {
-		return fmt.Errorf("stop broker server error:%s", err)
-	}
-
 	return nil
 }

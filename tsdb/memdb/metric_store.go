@@ -2,268 +2,634 @@ package memdb
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 
-	"github.com/eleme/lindb/pkg/hashers"
-	"github.com/eleme/lindb/pkg/lockers"
-	"github.com/eleme/lindb/tsdb/index"
-	"github.com/eleme/lindb/tsdb/metrictbl"
+	"github.com/lindb/lindb/constants"
+	"github.com/lindb/lindb/flow"
+	"github.com/lindb/lindb/pkg/timeutil"
+	pb "github.com/lindb/lindb/rpc/proto/field"
+	"github.com/lindb/lindb/series"
+	"github.com/lindb/lindb/series/field"
+	"github.com/lindb/lindb/sql/stmt"
+	"github.com/lindb/lindb/tsdb/metadb"
+	"github.com/lindb/lindb/tsdb/query"
+	"github.com/lindb/lindb/tsdb/tblstore/invertedindex"
+	"github.com/lindb/lindb/tsdb/tblstore/metricsdata"
+
+	"go.uber.org/atomic"
 )
 
-// versionedTSMap holds a mapping relation of tags and TsStore.
-// a version is assigned since newed,
-type versionedTSMap struct {
-	tsMap       map[uint32]*timeSeriesStore // map-key: FNV32a(sortedTag)
-	familyTimes map[int64]struct{}          // all segments
-	version     int64                       // uptime in nanoseconds
+//go:generate mockgen -source ./metric_store.go -destination=./metric_store_mock_test.go -package memdb
+
+const emptyMStoreSize = 8 + // immutable
+	8 + // mutable
+	24 + // rwmutex
+	8 + // atomic.Value
+	4 + // uint32
+	4 + // uint32
+	4 // int32
+
+// mStoreINTF abstracts a metricStore
+type mStoreINTF interface {
+	// SuggestTagKeys returns tagKeys by prefix-search
+	SuggestTagKeys(tagKeyPrefix string, limit int) []string
+
+	// SuggestTagValues returns tagValues by prefix-search
+	SuggestTagValues(tagKey, tagValuePrefix string, limit int) []string
+
+	// SetMaxTagsLimit sets the max tags-limit
+	SetMaxTagsLimit(limit uint32)
+
+	// IsEmpty detects whether if tags number is empty or not.
+	IsEmpty() bool
+
+	// GetTagsInUse return the in-use tStores count.
+	GetTagsInUse() int
+
+	// GetTagsUsed return count of all used tStores.
+	GetTagsUsed() int
+
+	// FlushInvertedIndexTo flushes series-index of mStore to the Writer
+	FlushInvertedIndexTo(
+		metricID uint32,
+		tableFlusher invertedindex.Flusher,
+		idGenerator metadb.IDGenerator,
+	) error
+
+	// FindSeriesIDsByExpr finds series ids by tag filter expr
+	FindSeriesIDsByExpr(expr stmt.TagFilter) (*series.MultiVerSeriesIDSet, error)
+
+	// GetSeriesIDsForTag get series ids by tagKey
+	GetSeriesIDsForTag(tagKey string) (*series.MultiVerSeriesIDSet, error)
+	// GetSeriesIDsForMetric get series ids by tagKey with min tag values
+	GetSeriesIDsForMetric(timeRange timeutil.TimeRange) (*series.MultiVerSeriesIDSet, error)
+
+	// GetGroupingContext returns the context of group by from the specified version and tagKeys
+	GetGroupingContext(tagKeys []string, version series.Version) (series.GroupingContext, error)
+
+	mStoreFieldIDGetter
+
+	// flow.DataFilter filters the data based on condition
+	flow.DataFilter
+
+	// MemSize returns the memory-size of this metric-store
+	MemSize() int
+
+	///////////////////////////////////
+	// Methods below will change the memory size
+	///////////////////////////////////
+	// Write Writes the metric
+	Write(
+		metric *pb.Metric,
+		writeCtx writeContext,
+	) (
+		writtenSize int,
+		err error)
+
+	// Evict scans all tsStore and removes which are not in use for a while.
+	Evict() (evictedSize int)
+
+	// FlushMetricsDataTo flushes metric-block of mStore to the Writer.
+	FlushMetricsDataTo(
+		tableFlusher metricsdata.Flusher,
+		flushCtx flushContext,
+	) (
+		flushedSize int,
+		err error)
+
+	// ResetVersion moves the current running mutable index to immutable list,
+	// then creates a new mutable map.
+	ResetVersion() (createdSize int, err error)
 }
 
-// allTSStores returns a tsStore list in order of tsID.
-func (vm *versionedTSMap) allTSStores() (buf *[]*timeSeriesStore, release func()) {
-	buf = tsStoresListPool.get(len(vm.tsMap))
-	var count = 0
-	for _, tsStore := range vm.tsMap {
-		(*buf)[count] = tsStore
-		count++
-	}
-	return buf, func() {
-		tsStoresListPool.put(buf)
-	}
+type mStoreFieldIDGetter interface {
+	// GetFieldIDOrGenerate gets fieldID from fieldsMeta
+	// and calls the id-generator when it's not exist
+	GetFieldIDOrGenerate(
+		metricID uint32,
+		fieldName string,
+		fieldType field.Type,
+		generator metadb.IDGenerator,
+	) (
+		fieldID uint16, err error)
 }
 
-// unionFamilyTimesTo update familyTimes to the input map.
-func (vm *versionedTSMap) unionFamilyTimesTo(segments map[int64]struct{}) {
-	for familyTime := range vm.familyTimes {
-		segments[familyTime] = struct{}{}
-	}
-}
-
-// flushMetricBlockTo flushes metric-block of mStore to the writer.
-func (vm *versionedTSMap) flushMetricBlocksTo(
-	writer metrictbl.TableWriter, metricID uint32, familyTime int64, generator index.IDGenerator) error {
-
-	// this familyTime doesn't exist
-	if _, ok := vm.familyTimes[familyTime]; !ok {
-		return nil
-	}
-	all, release := vm.allTSStores()
-	defer release()
-
-	for _, tsStore := range *all {
-		tsStore.flushTSEntryTo(writer, metricID, familyTime, generator)
-	}
-	return writer.WriteMetricBlock(metricID)
-}
-
-// newVersionedTSMap returns a new versionedTSMap.
-func newVersionedTSMap() *versionedTSMap {
-	return &versionedTSMap{
-		tsMap:       make(map[uint32]*timeSeriesStore),
-		familyTimes: make(map[int64]struct{}),
-		version:     time.Now().UnixNano()}
-}
-
-// metricStore is composed of the immutable part and mutable part of tsMap.
-// evictor scans the lruList to check which of them should be purged from the mutable part.
-// flusher flushes both the immutable and mutable tsMap to disk, after flushing, the immutable part will be removed.
+// metricStore is composed of the immutable part and mutable part of indexes.
+// evictor scans the index to check which of them should be purged from the mutable part.
+// flusher flushes both the immutable and mutable index to disk,
+// after flushing, the immutable part will be removed.
 type metricStore struct {
-	immutable    []*versionedTSMap // immutable TSMap list that has not been flushed to disk
-	sl4immutable lockers.SpinLock  // spin-lock of immutable versionedTSMap list
-	mutable      *versionedTSMap   // current mutable TSMap in use
-	mu4Mutable   sync.RWMutex      // sync.RWMutex for mutable tsMap
-	name         string            // metric name
-	maxTagsLimit uint32            // maximum number of combinations of tags
-	metricID     uint32            // default 0, unset
+	immutable    atomic.Value  // lock free immutable index that has not been flushed to disk
+	mutable      tagIndexINTF  // active mutable index in use
+	mux          sync.RWMutex  // read-Write lock for mutable index and fieldMetas
+	fieldsMetas  atomic.Value  // read only, storing (field.Metas), hold mux before storing new value
+	maxTagsLimit atomic.Uint32 // maximum number of combinations of tags
+	size         atomic.Int32  // memory-size
 }
 
-// newMetricStore returns a new metricStore from name.
-func newMetricStore(name string) *metricStore {
+// newMetricStore returns a new mStoreINTF.
+func newMetricStore() mStoreINTF {
+	mutable := newTagIndex()
 	ms := metricStore{
-		name:         name,
-		mutable:      newVersionedTSMap(),
-		maxTagsLimit: defaultMaxTagsLimit}
+		mutable:      mutable,
+		maxTagsLimit: *atomic.NewUint32(constants.DefaultMStoreMaxTagsCount),
+		size:         *atomic.NewInt32(int32(mutable.MemSize()))}
+	var fm field.Metas
+	ms.fieldsMetas.Store(fm)
 	return &ms
 }
 
-// setMaxTagsLimit removes race condition.
-func (ms *metricStore) setMaxTagsLimit(limit uint32) {
-	atomic.StoreUint32(&ms.maxTagsLimit, limit)
-}
-
-// mustGetMetricID returns metricID, if unset, generate a new one.
-func (ms *metricStore) mustGetMetricID(generator index.IDGenerator) uint32 {
-	metricID := atomic.LoadUint32(&ms.metricID)
-	if metricID > 0 {
-		return metricID
-	}
-	atomic.CompareAndSwapUint32(&ms.metricID, 0, generator.GenMetricID(ms.name))
-	return atomic.LoadUint32(&ms.metricID)
-}
-
-// getMaxTagsLimit removes race condition.
-func (ms *metricStore) getMaxTagsLimit() uint32 {
-	return atomic.LoadUint32(&ms.maxTagsLimit)
-}
-
-// addFamilyTime marked this familyTime.
-func (ms *metricStore) addFamilyTime(familyTime int64) {
-	ms.mu4Mutable.RLock()
-	_, ok := ms.mutable.familyTimes[familyTime]
-	ms.mu4Mutable.RUnlock()
+// getFieldIDOrGenerate gets fieldID from fieldsMeta, and calls the id-generator when not exist
+func (ms *metricStore) GetFieldIDOrGenerate(
+	metricID uint32,
+	fieldName string,
+	fieldType field.Type,
+	generator metadb.IDGenerator,
+) (
+	fieldID uint16,
+	err error,
+) {
+	fmList := ms.fieldsMetas.Load().(field.Metas)
+	fm, ok := fmList.GetFromName(fieldName)
+	// exist, check fieldType
 	if ok {
-		return
-	}
-	ms.mu4Mutable.Lock()
-	ms.mutable.familyTimes[familyTime] = struct{}{}
-	ms.mu4Mutable.Unlock()
-}
-
-// getTSStore returns timeSeriesStore, return false when not exist.
-func (ms *metricStore) getTSStore(tagsHash uint32) (tsStore *timeSeriesStore, ok bool) {
-	ms.mu4Mutable.RLock()
-	tsStore, ok = ms.mutable.tsMap[tagsHash]
-	ms.mu4Mutable.RUnlock()
-	return
-}
-
-// getOrCreateTSStore returns timeSeriesStore by sortedTags.
-func (ms *metricStore) getOrCreateTSStore(sortedTags string) *timeSeriesStore {
-	tagsHash := hashers.Fnv32a(sortedTags)
-
-	tsStore, ok := ms.getTSStore(tagsHash)
-	if !ok {
-		ms.mu4Mutable.Lock()
-		tsStore, ok = ms.mutable.tsMap[tagsHash]
-		if !ok {
-			tsStore = newTimeSeriesStore(sortedTags)
-			ms.mutable.tsMap[tagsHash] = tsStore
+		if fm.Type == fieldType {
+			return fm.ID, nil
 		}
-		ms.mu4Mutable.Unlock()
+		return 0, series.ErrWrongFieldType
 	}
-	return tsStore
+	// forbid creating new fStore when full
+	if fmList.Len() >= constants.TStoreMaxFieldsCount {
+		return 0, series.ErrTooManyFields
+	}
+	// not exist, create a new one
+	ms.mux.Lock()
+	defer ms.mux.Unlock()
+
+	fmList = ms.fieldsMetas.Load().(field.Metas)
+	fm, ok = fmList.GetFromName(fieldName)
+	// double check
+	if ok {
+		return fm.ID, nil
+	}
+	// generate and check fieldType
+	newFieldID, err := generator.GenFieldID(metricID, fieldName, fieldType)
+	if err != nil { // fieldType not matches to the existed
+		return 0, err
+	}
+	x2 := fmList.Clone()
+	x2 = x2.Insert(field.Meta{
+		Name: fieldName,
+		ID:   newFieldID,
+		Type: fieldType})
+	// store the new clone
+	ms.fieldsMetas.Store(x2)
+	return newFieldID, nil
+
 }
 
-// getTagsCount return the map's length.
-func (ms *metricStore) getTagsCount() int {
-	ms.mu4Mutable.RLock()
-	length := len(ms.mutable.tsMap)
-	ms.mu4Mutable.RUnlock()
-	return length
+// SuggestTagKeys returns tagKeys by prefix-search
+func (ms *metricStore) SuggestTagKeys(
+	tagKeyPrefix string,
+	limit int,
+) (
+	tagKeysList []string,
+) {
+	if limit <= 0 {
+		return nil
+	}
+	var tagKeysMap = make(map[string]struct{})
+	prefixSearchTagKey := func(tagIndex tagIndexINTF) {
+		for _, entrySet := range tagIndex.GetTagKVEntrySets() {
+			if len(tagKeysMap) >= limit {
+				return
+			}
+			if strings.HasPrefix(entrySet.key, tagKeyPrefix) {
+				tagKeysMap[entrySet.key] = struct{}{}
+			}
+		}
+	}
+	ms.mux.RLock()
+	immutable := ms.atomicGetImmutable()
+	prefixSearchTagKey(ms.mutable)
+	ms.mux.RUnlock()
+	if immutable != nil {
+		prefixSearchTagKey(immutable)
+	}
+
+	for tagKey := range tagKeysMap {
+		tagKeysList = append(tagKeysList, tagKey)
+	}
+	return tagKeysList
+}
+
+// SuggestTagValues returns tagValues by prefix-search
+func (ms *metricStore) SuggestTagValues(
+	tagKey,
+	tagValuePrefix string,
+	limit int,
+) (
+	tagValuesList []string,
+) {
+	if limit <= 0 {
+		return nil
+	}
+	if limit > constants.MaxSuggestions {
+		limit = constants.MaxSuggestions
+	}
+	var tagValuesMap = make(map[string]struct{})
+	prefixSearchTagValue := func(tagIndex tagIndexINTF) {
+		entrySet, ok := tagIndex.GetTagKVEntrySet(tagKey)
+		if ok {
+			for tagValue := range entrySet.values {
+				if strings.HasPrefix(tagValue, tagValuePrefix) {
+					if len(tagValuesMap) >= limit {
+						return
+					}
+					tagValuesMap[tagValue] = struct{}{}
+				}
+			}
+		}
+	}
+	ms.mux.RLock()
+	immutable := ms.atomicGetImmutable()
+	prefixSearchTagValue(ms.mutable)
+	ms.mux.RUnlock()
+	if immutable != nil {
+		prefixSearchTagValue(immutable)
+	}
+
+	for tagValue := range tagValuesMap {
+		tagValuesList = append(tagValuesList, tagValue)
+	}
+	return tagValuesList
+}
+
+func (ms *metricStore) GetGroupingContext(tagKeys []string,
+	version series.Version,
+) (series.GroupingContext, error) {
+	var found tagIndexINTF
+
+	ms.mux.RLock()
+	// release the lock when immutable matches to the version
+	immutable := ms.atomicGetImmutable()
+	if immutable != nil && immutable.Version() == version {
+		found = immutable
+		ms.mux.RUnlock()
+	} else {
+		defer ms.mux.RUnlock()
+	}
+	if ms.mutable.Version() == version {
+		found = ms.mutable
+	}
+	if found == nil {
+		return nil, series.ErrNotFound
+	}
+
+	tagKeysLen := len(tagKeys)
+	gCtx := query.NewGroupContext(tagKeysLen)
+	// validate tagKeys
+	for idx, tagKey := range tagKeys {
+		tagKVEntry, ok := found.GetTagKVEntrySet(tagKey)
+		if !ok {
+			return nil, fmt.Errorf("tagKey: %s not exist", tagKey)
+		}
+		tagValuesEntrySet := query.NewTagValuesEntrySet()
+		gCtx.SetTagValuesEntrySet(idx, tagValuesEntrySet)
+		tagValuesEntrySet.SetTagValues(tagKVEntry.values)
+	}
+	return &groupingContext{
+		ms:   ms,
+		gCtx: gCtx,
+	}, nil
+}
+
+// Write Writes the metric to the tStore
+func (ms *metricStore) Write(
+	metric *pb.Metric,
+	writeCtx writeContext,
+) (
+	writtenSize int,
+	err error,
+) {
+	if ms.isFull() {
+		return 0, series.ErrTooManyTags
+	}
+	var createdSize int
+	ms.mux.RLock()
+	tStore, ok := ms.mutable.GetTStore(metric.Tags)
+	ms.mux.RUnlock()
+	if !ok {
+		ms.mux.Lock()
+		tStore, createdSize, err = ms.mutable.GetOrCreateTStore(metric.Tags, writeCtx)
+		if err != nil {
+			ms.mux.Unlock()
+			return 0, err
+		}
+		ms.mux.Unlock()
+		ms.size.Add(int32(createdSize))
+	}
+
+	writtenSize, err = tStore.Write(metric, writeCtx)
+	if err == nil {
+		ms.mux.RLock()
+		ms.mutable.UpdateIndexTimeRange(writeCtx.PointTime())
+		ms.mux.RUnlock()
+	}
+	ms.size.Add(int32(writtenSize))
+	return writtenSize + createdSize, err
+}
+
+// SetMaxTagsLimit sets the max tags-limit of the metricStore
+func (ms *metricStore) SetMaxTagsLimit(limit uint32) {
+	ms.maxTagsLimit.Store(limit)
+}
+
+// getMaxTagsLimit return the max tags limit without race condition.
+func (ms *metricStore) getMaxTagsLimit() uint32 {
+	return ms.maxTagsLimit.Load()
+}
+
+// GetTagsInUse return the tStores count.
+func (ms *metricStore) GetTagsInUse() int {
+	ms.mux.RLock()
+	count := ms.mutable.TagsInUse()
+	ms.mux.RUnlock()
+	return count
+}
+
+// GetTagsUsed return count of all used tStores.
+func (ms *metricStore) GetTagsUsed() int {
+	ms.mux.RLock()
+	count := ms.mutable.TagsUsed()
+	ms.mux.RUnlock()
+	return count
 }
 
 // isFull detects if timeSeriesMap exceeds the tagsID limitation.
 func (ms *metricStore) isFull() bool {
-	return uint32(ms.getTagsCount()) >= ms.getMaxTagsLimit()
+	return uint32(ms.GetTagsUsed()) >= ms.getMaxTagsLimit()
 }
 
-// isEmpty detects if timeSeriesMap is empty or not.
-func (ms *metricStore) isEmpty() bool {
-	return ms.getTagsCount() == 0
+// IsEmpty detects if tStores were all Evicted or not.
+func (ms *metricStore) IsEmpty() bool {
+	return ms.GetTagsInUse() == 0 && ms.atomicGetImmutable() == nil
 }
 
-// evict scans all metric-stores and removes which are not in use for a while.
-func (ms *metricStore) evict() {
-	var evictList []uint32
-	ms.mu4Mutable.RLock()
-	for tagsHash, tStore := range ms.mutable.tsMap {
-		if tStore.shouldBeEvicted() {
-			evictList = append(evictList, tagsHash)
+func (ms *metricStore) atomicGetImmutable() tagIndexINTF {
+	immutable, ok := ms.immutable.Load().(tagIndexINTF)
+	// version zero is the placeholder tagIndexINTF stored in atomic.Value
+	if ok && immutable.Version() != 0 {
+		return immutable
+	}
+	return nil
+}
+
+// Evict scans all tsStore and removes which are not in use for a while.
+func (ms *metricStore) Evict() (evictedSize int) {
+	var (
+		evictList            []uint32
+		doubleCheckEvictList []uint32
+	)
+	// first check
+	ms.mux.RLock()
+	metricMap := ms.mutable.AllTStores()
+	it := metricMap.iterator()
+	for it.hasNext() {
+		seriesID, tStore := it.next()
+		if tStore.IsExpired() && tStore.IsNoData() {
+			evictList = append(evictList, seriesID)
 		}
 	}
-	ms.mu4Mutable.RUnlock()
-
-	ms.mu4Mutable.Lock()
-	for _, tagsHash := range evictList {
-		tsStore, ok := ms.mutable.tsMap[tagsHash]
+	ms.mux.RUnlock()
+	// double check
+	ms.mux.Lock()
+	for _, seriesID := range evictList {
+		tStore, ok := ms.mutable.GetTStoreBySeriesID(seriesID)
 		if !ok {
 			continue
 		}
-		if tsStore.shouldBeEvicted() {
-			delete(ms.mutable.tsMap, tagsHash)
+		if tStore.IsExpired() && tStore.IsNoData() {
+			doubleCheckEvictList = append(doubleCheckEvictList, seriesID)
 		}
 	}
-	ms.mu4Mutable.Unlock()
-}
+	removedTStores := ms.mutable.RemoveTStores(doubleCheckEvictList...)
+	ms.mux.Unlock()
 
-// unionFamilyTimesTo updates familyTimes of mutable and immutable to the input map.
-func (ms *metricStore) unionFamilyTimesTo(families map[int64]struct{}) {
-	ms.mu4Mutable.RLock()
-	ms.mutable.unionFamilyTimesTo(families)
-	ms.mu4Mutable.RUnlock()
-
-	ms.sl4immutable.Lock()
-	for _, vm := range ms.immutable {
-		vm.unionFamilyTimesTo(families)
+	for _, tStore := range removedTStores {
+		evictedSize += tStore.MemSize()
 	}
-	ms.sl4immutable.Unlock()
+	ms.size.Sub(int32(evictedSize))
+	return evictedSize
 }
 
-// assignNewVersion moves the mutable TSMap to immutable list, then creates a new mutable map.
-func (ms *metricStore) assignNewVersion() error {
-	ms.mu4Mutable.Lock()
-	if ms.mutable.version+minIntervalForResetMetricStore*int64(time.Millisecond) > time.Now().UnixNano() {
-		ms.mu4Mutable.Unlock()
-		return fmt.Errorf("reset version of metric: %s too frequently", ms.name)
+// ResetVersion marks the mutable index's status to immutable, then creates a new active index.
+func (ms *metricStore) ResetVersion() (createdSize int, err error) {
+	immutable := ms.atomicGetImmutable()
+	if immutable != nil {
+		return 0, series.ErrResetVersionUnavailable
 	}
-	oldMutable := ms.mutable
-	ms.mutable = newVersionedTSMap()
-	ms.mu4Mutable.Unlock()
 
-	ms.sl4immutable.Lock()
-	ms.immutable = append(ms.immutable, oldMutable)
-	ms.sl4immutable.Unlock()
-
-	return nil
-}
-
-// updateTSIDAndFieldID calls mustGet to generate tsID and fieldID.
-func (ms *metricStore) updateTSIDAndFieldID(metricID uint32, generator index.IDGenerator) {
-	ms.mu4Mutable.RLock()
-	tsStores, release := ms.mutable.allTSStores()
-	ms.mu4Mutable.RUnlock()
-	defer release()
-
-	for _, tsStore := range *tsStores {
-		tsStore.mustGetTSID(metricID, generator)
-		tsStore.generateFieldsID(metricID, generator)
+	ms.mux.Lock()
+	defer ms.mux.Unlock()
+	// double check
+	immutable = ms.atomicGetImmutable()
+	if immutable != nil {
+		return 0, series.ErrResetVersionUnavailable
 	}
+	ms.immutable.Store(ms.mutable)
+	ms.mutable = newTagIndex()
+	createdSize = ms.mutable.MemSize()
+	ms.size.Store(int32(createdSize))
+	return createdSize, nil
 }
 
-// flushMetricBlocksTo writes metric-blocks to the writer.
-func (ms *metricStore) flushMetricBlocksTo(
-	writer metrictbl.TableWriter, familyTime int64, generator index.IDGenerator) error {
+// FlushMetricsTo Writes metric-data to the table.
+// immutable tagIndex will be removed after call,
+// index shall be flushed before flushing data.
+func (ms *metricStore) FlushMetricsDataTo(
+	flusher metricsdata.Flusher,
+	flushCtx flushContext,
+) (
+	flushedSize int,
+	err error,
+) {
+	// flush field meta info
+	fmList := ms.fieldsMetas.Load().(field.Metas)
+	flusher.FlushFieldMetas(fmList)
 
-	var err error
-	metricID := ms.mustGetMetricID(generator)
+	// reset the mutable part
+	ms.mux.RLock()
+	flushedSize = ms.mutable.FlushVersionDataTo(flusher, flushCtx)
+	immutable := ms.atomicGetImmutable()
+	// remove the immutable, put the nopTagIndex into it
+	ms.immutable.Store(staticNopTagIndex)
+	ms.mux.RUnlock()
 
-	// pick immutable
-	ms.sl4immutable.Lock()
-	// build immutable metric-blocks
-	for _, vm := range ms.immutable {
-		if vm == nil {
-			continue
+	if immutable != nil {
+		flushedSize += immutable.FlushVersionDataTo(flusher, flushCtx)
+	}
+	ms.size.Sub(int32(flushedSize))
+	return flushedSize, flusher.FlushMetric(flushCtx.metricID)
+}
+
+// FlushInvertedIndexTo flushes the inverted-index of mStore to the Writer
+func (ms *metricStore) FlushInvertedIndexTo(
+	metricID uint32,
+	flusher invertedindex.Flusher,
+	idGenerator metadb.IDGenerator,
+) error {
+	// build relation of tagKey -> {tagValue1...}
+	tagKeyValues := make(map[string]map[string]struct{})
+
+	ms.mux.RLock()
+	defer ms.mux.RUnlock()
+	immutable := ms.atomicGetImmutable()
+	if immutable != nil {
+		for _, entrySet := range immutable.GetTagKVEntrySets() {
+			tagValues := make(map[string]struct{})
+			for tagValue := range entrySet.values {
+				tagValues[tagValue] = struct{}{}
+			}
+			tagKeyValues[entrySet.key] = tagValues
 		}
-		err = vm.flushMetricBlocksTo(writer, metricID, familyTime, generator)
-		delete(vm.familyTimes, familyTime)
-		if err != nil {
-			ms.sl4immutable.Unlock()
+	}
+	for _, entrySet := range ms.mutable.GetTagKVEntrySets() {
+		tagValues, ok := tagKeyValues[entrySet.key]
+		if !ok {
+			tagValues = make(map[string]struct{})
+		}
+		for tagValue := range entrySet.values {
+			tagValues[tagValue] = struct{}{}
+		}
+		tagKeyValues[entrySet.key] = tagValues
+	}
+
+	// flush data process
+	flushInvertedIndex := func(tagIndex tagIndexINTF, tagKey, tagValue string) {
+		entrySet, ok := tagIndex.GetTagKVEntrySet(tagKey)
+		if !ok {
+			return
+		}
+		if bitmap, ok := entrySet.values[tagValue]; ok {
+			flusher.FlushVersion(tagIndex.Version(), tagIndex.IndexTimeRange(), bitmap)
+		}
+	}
+
+	// gen tag key id and build tag key id to tag key mapping, then sort by tag key id
+	tagKeyIDs := make([]uint32, len(tagKeyValues))
+	tagKeyID2Name := make(map[uint32]string)
+	idx := 0
+	for tagKey := range tagKeyValues {
+		tagKeyID := idGenerator.GenTagKeyID(metricID, tagKey)
+		tagKeyIDs[idx] = tagKeyID
+		tagKeyID2Name[tagKeyID] = tagKey
+		idx++
+	}
+	sort.Slice(tagKeyIDs, func(i, j int) bool {
+		return tagKeyIDs[i] < tagKeyIDs[j]
+	})
+
+	// flush tag key inverted index data
+	for _, tagKeyID := range tagKeyIDs {
+		tagKey := tagKeyID2Name[tagKeyID]
+		tagValues := tagKeyValues[tagKey]
+		for tagValue := range tagValues {
+			if immutable != nil {
+				flushInvertedIndex(immutable, tagKey, tagValue)
+			}
+			flushInvertedIndex(ms.mutable, tagKey, tagValue)
+			flusher.FlushTagValue(tagValue)
+		}
+		if err := flusher.FlushTagKeyID(tagKeyID); err != nil {
 			return err
 		}
 	}
-	ms.sl4immutable.Unlock()
-
-	ms.mu4Mutable.RLock()
-	err = ms.mutable.flushMetricBlocksTo(writer, metricID, familyTime, generator)
-	ms.mu4Mutable.RUnlock()
-
-	ms.mu4Mutable.Lock()
-	delete(ms.mutable.familyTimes, familyTime)
-	ms.mu4Mutable.Unlock()
-
-	if err != nil {
-		return err
-	}
 	return nil
+}
+
+// FindSeriesIDsByExpr finds series ids by tag filter expr
+func (ms *metricStore) FindSeriesIDsByExpr(
+	expr stmt.TagFilter,
+) (
+	*series.MultiVerSeriesIDSet,
+	error,
+) {
+	multiVerSeriesIDSet := series.NewMultiVerSeriesIDSet()
+
+	findSeriesIDsByExpr := func(tagIdx tagIndexINTF) {
+		if bitMap := tagIdx.FindSeriesIDsByExpr(expr); bitMap != nil {
+			multiVerSeriesIDSet.Add(tagIdx.Version(), bitMap)
+		}
+	}
+	ms.mux.RLock()
+	findSeriesIDsByExpr(ms.mutable)
+	immutable := ms.atomicGetImmutable()
+	ms.mux.RUnlock()
+	if immutable != nil {
+		findSeriesIDsByExpr(immutable)
+	}
+	return multiVerSeriesIDSet, nil
+}
+
+// GetSeriesIDsForTag get series ids by tagKey
+func (ms *metricStore) GetSeriesIDsForTag(
+	tagKey string,
+) (
+	*series.MultiVerSeriesIDSet,
+	error,
+) {
+	multiVerSeriesIDSet := series.NewMultiVerSeriesIDSet()
+	getSeriesIDsForTag := func(tagIdx tagIndexINTF) {
+		if bitMap := tagIdx.GetSeriesIDsForTag(tagKey); bitMap != nil {
+			multiVerSeriesIDSet.Add(ms.mutable.Version(), bitMap)
+		}
+	}
+
+	ms.mux.RLock()
+	getSeriesIDsForTag(ms.mutable)
+	immutable := ms.atomicGetImmutable()
+	ms.mux.RUnlock()
+
+	if immutable != nil {
+		getSeriesIDsForTag(immutable)
+	}
+	return multiVerSeriesIDSet, nil
+}
+
+// GetSeriesIDsForMetric get series ids by tagKey with min tag values
+func (ms *metricStore) GetSeriesIDsForMetric(timeRange timeutil.TimeRange) (
+	*series.MultiVerSeriesIDSet,
+	error,
+) {
+	multiVerSeriesIDSet := series.NewMultiVerSeriesIDSet()
+	getSeriesIDsForMetric := func(tagIdx tagIndexINTF) {
+		if !timeRange.Contains(tagIdx.Version().Int64()) {
+			return
+		}
+		if bitMap := tagIdx.GetSeriesIDsForMetric(); bitMap != nil && !bitMap.IsEmpty() {
+			multiVerSeriesIDSet.Add(ms.mutable.Version(), bitMap)
+		}
+	}
+
+	ms.mux.RLock()
+	getSeriesIDsForMetric(ms.mutable)
+	immutable := ms.atomicGetImmutable()
+	ms.mux.RUnlock()
+
+	if immutable != nil {
+		getSeriesIDsForMetric(immutable)
+	}
+	return multiVerSeriesIDSet, nil
+}
+
+func (ms *metricStore) MemSize() int {
+	size := emptyMStoreSize + int(ms.size.Load())
+	immutable := ms.atomicGetImmutable()
+	if immutable != nil {
+		size += immutable.MemSize()
+	}
+	return size
 }

@@ -4,57 +4,111 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"time"
 
-	"github.com/eleme/lindb/broker/api"
-	"github.com/eleme/lindb/broker/api/admin"
-	"github.com/eleme/lindb/broker/middleware"
-	"github.com/eleme/lindb/config"
-	"github.com/eleme/lindb/constants"
-	"github.com/eleme/lindb/coordinator"
-	"github.com/eleme/lindb/coordinator/discovery"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/pkg/logger"
-	"github.com/eleme/lindb/pkg/server"
-	"github.com/eleme/lindb/pkg/state"
-	"github.com/eleme/lindb/pkg/util"
-	"github.com/eleme/lindb/service"
+	"github.com/lindb/lindb/broker/api"
+	"github.com/lindb/lindb/broker/api/admin"
+	masterAPI "github.com/lindb/lindb/broker/api/cluster"
+	"github.com/lindb/lindb/broker/api/metadata"
+	writeAPI "github.com/lindb/lindb/broker/api/metric"
+	queryAPI "github.com/lindb/lindb/broker/api/query"
+	stateAPI "github.com/lindb/lindb/broker/api/state"
+	"github.com/lindb/lindb/broker/handler"
+	"github.com/lindb/lindb/broker/middleware"
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/constants"
+	"github.com/lindb/lindb/coordinator"
+	"github.com/lindb/lindb/coordinator/discovery"
+	"github.com/lindb/lindb/coordinator/storage"
+	"github.com/lindb/lindb/coordinator/task"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/monitoring"
+	"github.com/lindb/lindb/parallel"
+	"github.com/lindb/lindb/pkg/hostutil"
+	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/server"
+	"github.com/lindb/lindb/pkg/state"
+	"github.com/lindb/lindb/pkg/timeutil"
+	"github.com/lindb/lindb/query"
+	"github.com/lindb/lindb/replication"
+	"github.com/lindb/lindb/rpc"
+	commonpb "github.com/lindb/lindb/rpc/proto/common"
+	"github.com/lindb/lindb/service"
 )
 
-const (
-	cfgName = "broker.toml"
-	// DefaultBrokerCfgFile defines broker default config file path
-	DefaultBrokerCfgFile = "./" + cfgName
-)
+// just for testing
+var getHostIP = hostutil.GetHostIP
+var hostName = os.Hostname
 
+// srv represents all services for broker
 type srv struct {
 	storageClusterService service.StorageClusterService
+	storageStateService   service.StorageStateService
+	shardAssignService    service.ShardAssignService
 	databaseService       service.DatabaseService
+	replicatorStateReport replication.ReplicatorStateReport
+	channelManager        replication.ChannelManager
+	taskManager           parallel.TaskManager
+	jobManager            parallel.JobManager
 }
 
+// factory represents all factories for broker
+type factory struct {
+	taskClient rpc.TaskClientFactory
+	taskServer rpc.TaskServerFactory
+}
+
+// apiHandler represents all api handlers for broker
 type apiHandler struct {
-	storageClusterAPI *admin.StorageClusterAPI
-	databaseAPI       *admin.DatabaseAPI
-	loginAPI          *api.LoginAPI
+	storageClusterAPI  *admin.StorageClusterAPI
+	databaseAPI        *admin.DatabaseAPI
+	databaseFlusherAPI *admin.DatabaseFlusherAPI
+	loginAPI           *api.LoginAPI
+	storageStateAPI    *stateAPI.StorageAPI
+	brokerStateAPI     *stateAPI.BrokerAPI
+	masterAPI          *masterAPI.MasterAPI
+	metricAPI          *queryAPI.MetricAPI
+	writeAPI           *writeAPI.WriteAPI
+	metaDatabaseAPI    *metadata.DatabaseAPI
+	metaMetricAPI      *metadata.MetricAPI
+}
+
+type rpcHandler struct {
+	task *parallel.TaskHandler
+}
+
+type tcpHandler struct {
+	handler rpc.TCPHandler
 }
 
 type middlewareHandler struct {
-	authentication *middleware.UserAuthentication
+	authentication middleware.Authentication
 }
 
 // runtime represents broker runtime dependency
 type runtime struct {
+	version string
 	state   server.State
-	cfgPath string
 	config  config.Broker
 	node    models.Node
 	// init value when runtime
-	repo       state.Repository
-	srv        srv
-	httpServer *http.Server
-	master     coordinator.Master
-	registry   discovery.Registry
+	repo          state.Repository
+	repoFactory   state.RepositoryFactory
+	srv           srv
+	factory       factory
+	httpServer    *http.Server
+	master        coordinator.Master
+	registry      discovery.Registry
+	stateMachines *coordinator.BrokerStateMachines
+
+	grpcServer rpc.GRPCServer
+	tcpServer  rpc.TCPServer
+	rpcHandler *rpcHandler
+	tcpHandler *tcpHandler
+
+	middleware *middlewareHandler
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -63,41 +117,43 @@ type runtime struct {
 }
 
 // NewBrokerRuntime creates broker runtime
-func NewBrokerRuntime(cfgPath string) server.Service {
+func NewBrokerRuntime(version string, config config.Broker) server.Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &runtime{
-		state:   server.New,
-		cfgPath: cfgPath,
-		ctx:     ctx,
-		cancel:  cancel,
-		log:     logger.GetLogger("broker/runtime"),
+		version:     version,
+		state:       server.New,
+		config:      config,
+		repoFactory: state.NewRepositoryFactory("broker"),
+		ctx:         ctx,
+		cancel:      cancel,
+		log:         logger.GetLogger("broker", "Runtime"),
 	}
+}
+
+// Name returns the broker service's name
+func (r *runtime) Name() string {
+	return "broker"
 }
 
 // Run runs broker server based on config file
 func (r *runtime) Run() error {
-	if r.cfgPath == "" {
-		r.cfgPath = DefaultBrokerCfgFile
-	}
-	if !util.Exist(r.cfgPath) {
-		r.state = server.Failed
-		return fmt.Errorf("config file doesn't exist, see how to initialize the config by `lind broker -h`")
-	}
-
-	r.config = config.Broker{}
-	if err := util.DecodeToml(r.cfgPath, &r.config); err != nil {
-		r.state = server.Failed
-		return fmt.Errorf("decode config file error:%s", err)
-	}
-	r.log.Info("load broker config from file successfully", logger.String("config", r.cfgPath))
-
-	ip, err := util.GetHostIP()
+	ip, err := getHostIP()
 	if err != nil {
 		r.state = server.Failed
-		return fmt.Errorf("cannot get server ip address, error:%s", err)
+		return fmt.Errorf("cannot get server's ip address, error: %s", err)
 	}
 
-	r.node = models.Node{IP: ip, Port: r.config.HTTP.Port}
+	hostName, err := hostName()
+	if err != nil {
+		r.log.Error("get host name with error", logger.Error(err))
+		hostName = "unknown"
+	}
+	r.node = models.Node{
+		IP:       ip,
+		Port:     r.config.BrokerBase.GRPC.Port,
+		HostName: hostName,
+		TCPPort:  r.config.BrokerBase.TCP.Port,
+	}
 
 	// start state repository
 	if err := r.startStateRepo(); err != nil {
@@ -105,25 +161,62 @@ func (r *runtime) Run() error {
 		return err
 	}
 
+	r.factory = factory{
+		taskClient: rpc.NewTaskClientFactory(r.node),
+		taskServer: rpc.NewTaskServerFactory(),
+	}
+
 	r.buildServiceDependency()
+	discoveryFactory := discovery.NewFactory(r.repo)
+
+	smFactory := coordinator.NewStateMachineFactory(&coordinator.StateMachineCfg{
+		Ctx:               r.ctx,
+		CurrentNode:       r.node,
+		ChannelManager:    r.srv.channelManager,
+		ShardAssignSRV:    r.srv.shardAssignService,
+		DiscoveryFactory:  discoveryFactory,
+		TaskClientFactory: r.factory.taskClient,
+	})
+
+	// finally start all state machine
+	r.stateMachines = coordinator.NewBrokerStateMachines(smFactory)
+	if err := r.stateMachines.Start(); err != nil {
+		return fmt.Errorf("start state machines error: %s", err)
+	}
+
+	masterCfg := &coordinator.MasterCfg{
+		Ctx:                 r.ctx,
+		Repo:                r.repo,
+		Node:                r.node,
+		TTL:                 1, //TODO need config
+		DiscoveryFactory:    discoveryFactory,
+		ControllerFactory:   task.NewControllerFactory(),
+		ClusterFactory:      storage.NewClusterFactory(),
+		RepoFactory:         r.repoFactory,
+		StorageStateService: r.srv.storageStateService,
+		ShardAssignService:  r.srv.shardAssignService,
+	}
+	r.master = coordinator.NewMaster(masterCfg)
+
 	r.buildMiddlewareDependency()
 	r.buildAPIDependency()
+	// start tcp server
+	r.startGRPCServer()
+	r.startTCPServer()
 
-	// start http server
-	r.startHTTPServer()
-
-	// register storage node info
+	// register broker node info
 	//TODO TTL default value???
 	r.registry = discovery.NewRegistry(r.repo, constants.ActiveNodesPath, 1)
 	if err := r.registry.Register(r.node); err != nil {
 		return fmt.Errorf("register storage node error:%s", err)
 	}
+	r.master.Start()
 
-	//TODO config ttl
-	r.master = coordinator.NewMaster(r.repo, r.node, 1)
-	if err := r.master.Start(); err != nil {
-		return fmt.Errorf("start master error:%s", err)
-	}
+	// start http server
+	r.startHTTPServer()
+
+	// start stat monitoring
+	r.monitoring()
 
 	r.state = server.Running
 	return nil
@@ -139,15 +232,26 @@ func (r *runtime) Stop() error {
 	r.log.Info("stopping broker server.....")
 	defer r.cancel()
 
-	if r.master != nil {
-		r.master.Stop()
-	}
-
 	if r.httpServer != nil {
 		r.log.Info("starting shutdown http server")
 		if err := r.httpServer.Shutdown(r.ctx); err != nil {
 			r.log.Error("shutdown http server error", logger.Error(err))
 		}
+	}
+
+	// close registry, deregister broker node from active list
+	if r.registry != nil {
+		if err := r.registry.Close(); err != nil {
+			r.log.Error("unregister broker node error", logger.Error(err))
+		}
+	}
+
+	if r.master != nil {
+		r.master.Stop()
+	}
+
+	if r.stateMachines != nil {
+		r.stateMachines.Stop()
 	}
 
 	if r.repo != nil {
@@ -157,18 +261,29 @@ func (r *runtime) Stop() error {
 		}
 	}
 
+	// finally shutdown rpc server
+	if r.grpcServer != nil {
+		r.log.Info("stopping grpc server")
+		r.grpcServer.Stop()
+	}
+
+	if r.tcpServer != nil {
+		r.log.Info("stopping tcp server")
+		r.tcpServer.Stop()
+	}
+
 	r.log.Info("broker server stop complete")
 	r.state = server.Terminated
 	return nil
 }
 
-// startHTTPServer starts http server for api handler
+// startHTTPServer starts http server for api rpcHandler
 func (r *runtime) startHTTPServer() {
-	port := r.config.HTTP.Port
+	port := r.config.BrokerBase.HTTP.Port
 
 	r.log.Info("starting http server", logger.Uint16("port", port))
 	router := api.NewRouter()
-	//TODO add timeout config???
+
 	r.httpServer = &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
 		WriteTimeout: time.Second * 15,
@@ -178,15 +293,15 @@ func (r *runtime) startHTTPServer() {
 	}
 	go func() {
 		if err := r.httpServer.ListenAndServe(); err != http.ErrServerClosed {
-			panic(fmt.Sprintf("start http server error:%s", err))
+			panic(fmt.Sprintf("start http server with error: %s", err))
 		}
-		r.log.Info("http server stop complete")
+		r.log.Info("http server stopped successfully")
 	}()
 }
 
 // startStateRepo starts state repository
 func (r *runtime) startStateRepo() error {
-	repo, err := state.NewRepo(r.config.Coordinator)
+	repo, err := r.repoFactory.CreateRepo(r.config.BrokerBase.Coordinator)
 	if err != nil {
 		return fmt.Errorf("start broker state repository error:%s", err)
 	}
@@ -197,42 +312,166 @@ func (r *runtime) startStateRepo() error {
 
 // buildServiceDependency builds broker service dependency
 func (r *runtime) buildServiceDependency() {
+	// todo watch stateMachine states change.
+
+	replicatorStateReport := replication.NewReplicatorStateReport(r.node, r.repo)
+
+	// hard code create channel first.
+	cm := replication.NewChannelManager(r.config.BrokerBase.ReplicationChannel, rpc.NewClientStreamFactory(r.node), replicatorStateReport)
+	taskManager := parallel.NewTaskManager(r.node, r.factory.taskClient, r.factory.taskServer)
+	jobManager := parallel.NewJobManager(taskManager)
+
+	//FIXME (stone100)close it????
+	taskReceiver := parallel.NewTaskReceiver(jobManager)
+	r.factory.taskClient.SetTaskReceiver(taskReceiver)
+
 	srv := srv{
 		storageClusterService: service.NewStorageClusterService(r.repo),
 		databaseService:       service.NewDatabaseService(r.repo),
+		storageStateService:   service.NewStorageStateService(r.repo),
+		shardAssignService:    service.NewShardAssignService(r.repo),
+		replicatorStateReport: replicatorStateReport,
+		channelManager:        cm,
+		taskManager:           taskManager,
+		jobManager:            jobManager,
 	}
 	r.srv = srv
 }
 
 // buildAPIDependency builds broker api dependency
 func (r *runtime) buildAPIDependency() {
-	handler := apiHandler{
-		storageClusterAPI: admin.NewStorageClusterAPI(r.srv.storageClusterService),
-		databaseAPI:       admin.NewDatabaseAPI(r.srv.databaseService),
-		loginAPI:          api.NewLoginAPI(r.config.User),
+	handlers := apiHandler{
+		storageClusterAPI:  admin.NewStorageClusterAPI(r.srv.storageClusterService),
+		databaseAPI:        admin.NewDatabaseAPI(r.srv.databaseService),
+		databaseFlusherAPI: admin.NewDatabaseFlusherAPI(r.master),
+		loginAPI:           api.NewLoginAPI(r.config.BrokerBase.User, r.middleware.authentication),
+		storageStateAPI:    stateAPI.NewStorageAPI(r.ctx, r.repo, r.stateMachines.StorageSM, r.srv.shardAssignService, r.srv.databaseService),
+		brokerStateAPI:     stateAPI.NewBrokerAPI(r.ctx, r.repo, r.stateMachines.NodeSM),
+		masterAPI:          masterAPI.NewMasterAPI(r.master),
+		metricAPI: queryAPI.NewMetricAPI(r.stateMachines.ReplicaStatusSM,
+			r.stateMachines.NodeSM, query.NewExecutorFactory(), r.srv.jobManager),
+		writeAPI: writeAPI.NewWriteAPI(r.srv.channelManager),
+
+		metaDatabaseAPI: metadata.NewDatabaseAPI(r.srv.databaseService),
+		metaMetricAPI: metadata.NewMetricAPI(r.stateMachines.ReplicaStatusSM,
+			r.stateMachines.NodeSM, query.NewExecutorFactory(), r.srv.jobManager),
 	}
 
-	api.AddRoutes("Login", http.MethodPost, "/login", handler.loginAPI.Login)
-	api.AddRoutes("Check", http.MethodGet, "/check/1", handler.loginAPI.Check)
+	api.AddRoute("Login", http.MethodPost, "/login", handlers.loginAPI.Login)
+	api.AddRoute("Check", http.MethodGet, "/check/1", handlers.loginAPI.Check)
 
-	api.AddRoutes("SaveStorageCluster", http.MethodPost, "/storage/cluster", handler.storageClusterAPI.Create)
-	api.AddRoutes("GetStorageCluster", http.MethodGet, "/storage/cluster", handler.storageClusterAPI.GetByName)
-	api.AddRoutes("DeleteStorageCluster", http.MethodDelete, "/storage/cluster", handler.storageClusterAPI.DeleteByName)
-	api.AddRoutes("ListStorageClusters", http.MethodGet, "/storage/cluster/list", handler.storageClusterAPI.List)
+	api.AddRoute("SaveStorageCluster", http.MethodPost, "/storage/cluster", handlers.storageClusterAPI.Create)
+	api.AddRoute("GetStorageCluster", http.MethodGet, "/storage/cluster", handlers.storageClusterAPI.GetByName)
+	api.AddRoute("DeleteStorageCluster", http.MethodDelete, "/storage/cluster", handlers.storageClusterAPI.DeleteByName)
+	api.AddRoute("ListStorageClusters", http.MethodGet, "/storage/cluster/list", handlers.storageClusterAPI.List)
 
-	api.AddRoutes("CreateOrUpdateDatabase", http.MethodPost, "/database", handler.databaseAPI.Save)
-	api.AddRoutes("GetDatabase", http.MethodGet, "/database", handler.databaseAPI.GetByName)
+	api.AddRoute("CreateOrUpdateDatabase", http.MethodPost, "/database", handlers.databaseAPI.Save)
+	api.AddRoute("GetDatabase", http.MethodGet, "/database", handlers.databaseAPI.GetByName)
+	api.AddRoute("ListDatabase", http.MethodGet, "/database/list", handlers.databaseAPI.List)
+	api.AddRoute("FLushDatabase", http.MethodGet, "/database/flush", handlers.databaseFlusherAPI.SubmitFlushTask)
+
+	api.AddRoute("ListStorageClusterNodesState", http.MethodGet, "/storage/cluster/state", handlers.storageStateAPI.GetStorageClusterState)
+	api.AddRoute("ListStorageClusterState", http.MethodGet, "/storage/cluster/state/list", handlers.storageStateAPI.ListStorageClusterState)
+	api.AddRoute("ListBrokerClusterState", http.MethodGet, "/broker/cluster/state", handlers.brokerStateAPI.ListBrokersStat)
+
+	api.AddRoute("GetMasterState", http.MethodGet, "/cluster/master", handlers.masterAPI.GetMaster)
+
+	api.AddRoute("QueryMetric", http.MethodGet, "/query/metric", handlers.metricAPI.Search)
+
+	api.AddRoute("WriteSumMetric", http.MethodPut, "/metric/sum", handlers.writeAPI.Sum)
+
+	api.AddRoute("ListDatabaseNodes", http.MethodGet, "/metadata/database/names", handlers.metaDatabaseAPI.ListDatabaseNames)
+	api.AddRoute("SuggestMetric", http.MethodGet, "/metadata/suggest/metric", handlers.metaMetricAPI.SuggestMetrics)
+	api.AddRoute("SuggestTagKey", http.MethodGet, "/metadata/suggest/tagKey", handlers.metaMetricAPI.SuggestTagKeys)
+	api.AddRoute("SuggestTagValue", http.MethodGet, "/metadata/suggest/tagValue", handlers.metaMetricAPI.SuggestTagValues)
 }
 
 // buildMiddlewareDependency builds middleware dependency
 // pattern support regexp matching
 func (r *runtime) buildMiddlewareDependency() {
-	middlewareHandler := middlewareHandler{
-		authentication: middleware.NewUserAuthentication(r.config.User),
+	r.middleware = &middlewareHandler{
+		authentication: middleware.NewAuthentication(r.config.BrokerBase.User),
+	}
+	httpAPI, err := regexp.Compile("/*")
+	if err == nil {
+		api.AddMiddleware(middleware.AccessLogMiddleware, httpAPI)
 	}
 	validate, err := regexp.Compile("/check/*")
 	if err == nil {
-		api.AddMiddleware(middlewareHandler.authentication.ValidateMiddleware, validate)
+		api.AddMiddleware(r.middleware.authentication.Validate, validate)
+	}
+}
+
+// startTCPServer starts the TCP server
+func (r *runtime) startTCPServer() {
+	r.buildTCPHandlers()
+	r.tcpServer = rpc.NewTCPServer(fmt.Sprintf(":%d", r.config.BrokerBase.TCP.Port), r.tcpHandler.handler)
+
+	go func() {
+		if err := r.tcpServer.Start(); err != nil {
+			r.log.Error("broker tcp server", logger.Error(err))
+			panic(err)
+		}
+	}()
+}
+
+// startGRPCServer starts the GRPC server
+func (r *runtime) startGRPCServer() {
+	r.grpcServer = rpc.NewGRPCServer(fmt.Sprintf(":%d", r.config.BrokerBase.GRPC.Port))
+
+	// bind grpc handlers
+	r.bindGRPCHandlers()
+
+	go func() {
+		if err := r.grpcServer.Start(); err != nil {
+			panic(err)
+		}
+	}()
+}
+
+// bindGRPCHandlers binds rpc handlers, registers rpcHandler into grpc server
+func (r *runtime) bindGRPCHandlers() {
+	//FIXME: (stone1100) need close
+	dispatcher := parallel.NewIntermediateTaskDispatcher()
+	r.rpcHandler = &rpcHandler{
+		task: parallel.NewTaskHandler(r.config.BrokerBase.Query, r.factory.taskServer, dispatcher),
 	}
 
+	commonpb.RegisterTaskServiceServer(r.grpcServer.GetServer(), r.rpcHandler.task)
+}
+
+//buildTCPHandlers builds tcp handlers
+func (r *runtime) buildTCPHandlers() {
+	r.tcpHandler = &tcpHandler{handler: handler.NewTCPHandler(r.srv.channelManager)}
+}
+
+func (r *runtime) monitoring() {
+	systemStatMonitorEnabled := r.config.Monitor.SystemReportInterval > 0
+	node := models.ActiveNode{
+		Version:    r.version,
+		Node:       r.node,
+		OnlineTime: timeutil.Now(),
+	}
+	if systemStatMonitorEnabled {
+		r.log.Info("SystemStatMonitor is running")
+		go monitoring.NewSystemCollector(
+			r.ctx,
+			r.config.Monitor.SystemReportInterval.Duration(),
+			r.config.BrokerBase.ReplicationChannel.Dir,
+			r.repo,
+			constants.GetNodeMonitoringStatPath(r.node.Indicator()),
+			node).Run()
+	}
+
+	// todo: @stone1100, broker metric http post url is not implemented
+	runtimeStatMonitorEnabled := r.config.Monitor.RuntimeReportInterval > 0
+	if runtimeStatMonitorEnabled {
+		r.log.Info("RuntimeStatMonitor is running")
+		go monitoring.NewRunTimeCollector(
+			r.ctx,
+			fmt.Sprintf("http://localhost:%d/", r.config.BrokerBase.HTTP), // todo
+			r.config.Monitor.RuntimeReportInterval.Duration(),
+			map[string]string{"role": "broker", "version": r.version},
+		)
+	}
 }

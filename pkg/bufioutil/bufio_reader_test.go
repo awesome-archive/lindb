@@ -20,17 +20,6 @@ func Test_NewBufioReader(t *testing.T) {
 	assert.NotNil(t, br)
 }
 
-func TestBufioReader_getVariantLength(t *testing.T) {
-	assert.Equal(t, int64(1), GetVariantLength(0))
-	assert.Equal(t, int64(1), GetVariantLength(1))
-	assert.Equal(t, int64(1), GetVariantLength(127))
-	assert.Equal(t, int64(2), GetVariantLength(129))
-	assert.Equal(t, int64(2), GetVariantLength(16383))
-	assert.Equal(t, int64(3), GetVariantLength(16384))
-	assert.Equal(t, int64(3), GetVariantLength(2097151))
-	assert.Equal(t, int64(4), GetVariantLength(2097152))
-}
-
 func TestBufioReader_content(t *testing.T) {
 	defer os.Remove(_testFile)
 	bw, _ := NewBufioWriter(_testFile)

@@ -3,9 +3,9 @@ package admin
 import (
 	"net/http"
 
-	"github.com/eleme/lindb/broker/api"
-	"github.com/eleme/lindb/models"
-	"github.com/eleme/lindb/service"
+	"github.com/lindb/lindb/broker/api"
+	"github.com/lindb/lindb/models"
+	"github.com/lindb/lindb/service"
 )
 
 // DatabaseAPI represents database admin rest api
@@ -29,8 +29,7 @@ func (d *DatabaseAPI) GetByName(w http.ResponseWriter, r *http.Request) {
 	}
 	database, err := d.databaseService.Get(databaseName)
 	if err != nil {
-		//TODO add not found error?????
-		api.Error(w, err)
+		api.NotFound(w)
 		return
 	}
 	api.OK(w, database)
@@ -39,8 +38,8 @@ func (d *DatabaseAPI) GetByName(w http.ResponseWriter, r *http.Request) {
 // Save creates the database config if there is no database
 // config with the name database.Name, otherwise update the config
 func (d *DatabaseAPI) Save(w http.ResponseWriter, r *http.Request) {
-	database := models.Database{}
-	err := api.GetJSONBodyFromRequest(r, &database)
+	database := &models.Database{}
+	err := api.GetJSONBodyFromRequest(r, database)
 	if err != nil {
 		api.Error(w, err)
 		return
@@ -51,4 +50,14 @@ func (d *DatabaseAPI) Save(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.NoContent(w)
+}
+
+// List returns all database configs
+func (d *DatabaseAPI) List(w http.ResponseWriter, r *http.Request) {
+	dbs, err := d.databaseService.List()
+	if err != nil {
+		api.Error(w, err)
+		return
+	}
+	api.OK(w, dbs)
 }

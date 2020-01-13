@@ -4,33 +4,39 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
+
+	"github.com/lindb/lindb/config"
+	"github.com/lindb/lindb/pkg/logger"
 
 	etcdcliv3 "github.com/coreos/etcd/clientv3"
-
-	"github.com/eleme/lindb/pkg/logger"
 )
 
 // etcdRepository is repository based on etcd storage
 type etcdRepository struct {
 	namespace string
 	client    *etcdcliv3.Client
+	logger    *logger.Logger
 }
 
 // newEtedRepository creates a new repository based on etcd storage
-func newEtedRepository(config Config) (Repository, error) {
+func newEtedRepository(repoState config.RepoState, owner string) (Repository, error) {
 	cfg := etcdcliv3.Config{
-		Endpoints: config.Endpoints,
+		Endpoints: repoState.Endpoints,
 		// DialTimeout: config.DialTimeout * time.Second,
 	}
 	cli, err := etcdcliv3.New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create etc client error:%s", err)
 	}
-	logger.GetLogger("state").Info("new etcd client successfully", logger.Any("endpoints", config.Endpoints))
-	return &etcdRepository{
-		namespace: config.Namespace,
+	repo := etcdRepository{
+		namespace: repoState.Namespace,
 		client:    cli,
-	}, nil
+		logger:    logger.GetLogger(owner, "ETCD")}
+
+	repo.logger.Info("new etcd client successfully",
+		logger.Any("endpoints", repoState.Endpoints))
+	return &repo, nil
 }
 
 // Get retrieves value for given key from etcd
@@ -43,17 +49,17 @@ func (r *etcdRepository) Get(ctx context.Context, key string) ([]byte, error) {
 }
 
 // List retrieves list for given prefix from etcd
-func (r *etcdRepository) List(ctx context.Context, prefix string) ([][]byte, error) {
+func (r *etcdRepository) List(ctx context.Context, prefix string) ([]KeyValue, error) {
 	resp, err := r.client.Get(ctx, r.keyPath(prefix), etcdcliv3.WithPrefix())
 	if err != nil {
 		return nil, err
 	}
-	var result [][]byte
+	var result []KeyValue
 
 	if len(resp.Kvs) > 0 {
 		for _, kv := range resp.Kvs {
 			if len(kv.Value) > 0 {
-				result = append(result, kv.Value)
+				result = append(result, KeyValue{Key: r.parseKey(string(kv.Key)), Value: kv.Value})
 			}
 		}
 	}
@@ -79,8 +85,9 @@ func (r *etcdRepository) Close() error {
 
 // Heartbeat does heartbeat on the key with a value and ttl based on etcd
 func (r *etcdRepository) Heartbeat(ctx context.Context, key string, value []byte, ttl int64) (<-chan Closed, error) {
-	h := newHeartbeat(r.client, r.keyPath(key), value, ttl)
-	err := h.grantKeepAliveLease(ctx)
+	h := newHeartbeat(r.client, r.keyPath(key), value, ttl, false)
+	h.withLogger(r.logger)
+	_, err := h.grantKeepAliveLease(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -89,18 +96,19 @@ func (r *etcdRepository) Heartbeat(ctx context.Context, key string, value []byte
 	go func() {
 		// close closed channel, if keep alive stopped
 		defer close(ch)
-		h.keepAlive(ctx, false)
+		h.keepAlive(ctx)
 	}()
 	return ch, nil
 }
 
-// PutIfNotExitAndKeepLease  puts a key with a value.it will be success
+// Elect puts a key with a value.it will be success
 // if the key does not exist,otherwise it will be failed.When this
 // operation success,it will do keepalive background
-func (r *etcdRepository) PutIfNotExist(ctx context.Context, key string,
+func (r *etcdRepository) Elect(ctx context.Context, key string,
 	value []byte, ttl int64) (bool, <-chan Closed, error) {
-	h := newHeartbeat(r.client, r.keyPath(key), value, ttl)
-	success, err := h.PutIfNotExist(ctx)
+	h := newHeartbeat(r.client, r.keyPath(key), value, ttl, true)
+	h.withLogger(r.logger)
+	success, err := h.grantKeepAliveLease(ctx)
 	if err != nil {
 		return false, nil, err
 	}
@@ -110,8 +118,10 @@ func (r *etcdRepository) PutIfNotExist(ctx context.Context, key string,
 		// do keepalive/retry background
 		go func() {
 			// close closed channel, if keep alive stopped
-			defer close(ch)
-			h.keepAlive(ctx, true)
+			defer func() {
+				close(ch)
+			}()
+			h.keepAlive(ctx)
 		}()
 		return success, ch, nil
 	}
@@ -144,8 +154,8 @@ func (r *etcdRepository) getValue(key string, resp *etcdcliv3.GetResponse) ([]by
 //
 // NOTE: when caller meets EventTypeAll, it must clean all previous values, since it may contains
 // deleted values we do not know.
-func (r *etcdRepository) Watch(ctx context.Context, key string) WatchEventChan {
-	watcher := newWatcher(ctx, r, r.keyPath(key))
+func (r *etcdRepository) Watch(ctx context.Context, key string, fetchVal bool) WatchEventChan {
+	watcher := newWatcher(ctx, r, r.keyPath(key), fetchVal)
 	return watcher.EventC
 }
 
@@ -154,8 +164,8 @@ func (r *etcdRepository) Watch(ctx context.Context, key string) WatchEventChan {
 //
 // NOTE: when caller meets EventTypeAll, it must clean all previous values, since it may contains
 // deleted values we do not know.
-func (r *etcdRepository) WatchPrefix(ctx context.Context, prefixKey string) WatchEventChan {
-	watcher := newWatcher(ctx, r, r.keyPath(prefixKey), etcdcliv3.WithPrefix())
+func (r *etcdRepository) WatchPrefix(ctx context.Context, prefixKey string, fetchVal bool) WatchEventChan {
+	watcher := newWatcher(ctx, r, r.keyPath(prefixKey), fetchVal, etcdcliv3.WithPrefix())
 	return watcher.EventC
 }
 
@@ -176,10 +186,55 @@ func (r *etcdRepository) Batch(ctx context.Context, batch Batch) (bool, error) {
 	return resp.Succeeded, nil
 }
 
+// NewTransaction creates a new transaction
+func (r *etcdRepository) NewTransaction() Transaction {
+	return newTransaction(r)
+}
+
+// Commit commits the transaction, if fail return err
+func (r *etcdRepository) Commit(ctx context.Context, txn Transaction) error {
+	t, ok := txn.(*transaction)
+	if !ok {
+		return ErrTxnConvert
+	}
+	resp, err := r.client.Txn(ctx).If(t.cmps...).Then(t.ops...).Commit()
+	return TxnErr(resp, err)
+}
+
 // keyPath return new key path with namespace prefix
 func (r *etcdRepository) keyPath(key string) string {
 	if len(r.namespace) > 0 {
 		return filepath.Join(r.namespace, key)
 	}
 	return key
+}
+
+// parseKey parses the key, removes the namespace
+func (r *etcdRepository) parseKey(key string) string {
+	if len(r.namespace) == 0 {
+		return key
+	}
+	return strings.Replace(key, r.namespace, "", 1)
+}
+
+type transaction struct {
+	ops  []etcdcliv3.Op
+	cmps []etcdcliv3.Cmp
+	repo *etcdRepository
+}
+
+func newTransaction(repo *etcdRepository) Transaction {
+	return &transaction{repo: repo}
+}
+
+func (t *transaction) ModRevisionCmp(key, op string, v interface{}) {
+	t.cmps = append(t.cmps, etcdcliv3.Compare(etcdcliv3.ModRevision(t.repo.keyPath(key)), op, v))
+}
+
+func (t *transaction) Put(key string, value []byte) {
+	t.ops = append(t.ops, etcdcliv3.OpPut(t.repo.keyPath(key), string(value)))
+}
+
+func (t *transaction) Delete(key string) {
+	t.ops = append(t.ops, etcdcliv3.OpDelete(t.repo.keyPath(key)))
 }
